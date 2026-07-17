@@ -54,6 +54,7 @@ mod risk_management;
 pub use governance_params::{GovernanceParams, ParamKey, PendingParamUpdate};
 pub use nonce::NonceGuard;
 pub use rate_limit::SensitiveRateLimiter;
+pub use rate_limit::action_tags as sensitive_action_tags;
 
 mod portfolio {
     include!("../portfolio.rs");
@@ -196,6 +197,14 @@ pub fn resume_trading(env: Env, caller: Address) -> Result<bool, PeerXError> {
 pub fn set_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), PeerXError> {
     caller.require_auth();
     crate::admin::require_admin(&env, &caller)?;
+
+    // ── Sensitive-action rate limit (audit-logged) ─────────────────────────
+    SensitiveRateLimiter::check_and_record_tagged(
+        &env,
+        &caller,
+        crate::rate_limit::action_tags::SET_ADMIN,
+    )?;
+
     env.storage().persistent().set(&ADMIN_KEY, &new_admin);
     Ok(())
 }
@@ -727,6 +736,12 @@ impl CounterContract {
     /// Returns the number of storage entries cleaned up.
     pub fn cleanup_rate_limits(env: Env, user: Address) -> u32 {
         RateLimiter::cleanup_rate_limits(&env, &user)
+    }
+
+    /// Get the number of sensitive admin actions used by `user` in the
+    /// current 10-minute window (limit = `SENSITIVE_ACTION_LIMIT`).
+    pub fn get_sensitive_rate_limit_usage(env: Env, user: Address) -> u32 {
+        SensitiveRateLimiter::current_usage(&env, &user)
     }
 
     // ===== BATCH OPERATIONS =====
