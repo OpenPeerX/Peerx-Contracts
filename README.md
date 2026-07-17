@@ -143,8 +143,12 @@ PeerX-Contracts/
 ├── Cargo.toml                 # Workspace root (counter, soroban-ping)
 ├── soroban.toml               # Soroban network profiles (testnet/mainnet/local)
 ├── README.md                  # ← you are here
-├── SECURITY.md                # Auditing, invariants, trust model
+├── SECURITY.md                # Auditing, invariants, trust model, SLA summary
+├── CONTRIBUTING.md            # Contribution rules + security disclosure SLA acknowledgment
+├── docs/
+│   └── SLA.md                 # Security response SLA: <24h ack, <14d/<30d patches, coordinated disclosure
 ├── .github/
+│   ├── ISSUE_TEMPLATE/       # Issue templates (security reports acknowledge the SLA)
 │   ├── workflows/
 │   │   ├── ci.yml             # Single canonical CI (quality + build + test)
 │   │   └── README.md          # Workflow rationale
@@ -303,7 +307,7 @@ We treat the contract suite as **auditable production code** even though assets 
 - **Emergency** — admin pause, per-account freeze, on-chain state snapshots for forensic recovery.
 - **Fuzzing** — `cargo test fuzz_ -- --nocapture` exercises edge cases on every entry point.
 
-See [`SECURITY.md`](SECURITY.md) for the full vulnerability checklist, invariant specifications, and authorization matrix.
+See [`SECURITY.md`](SECURITY.md) for the full vulnerability checklist, invariant specifications, and authorization matrix. Security disclosures are handled under a documented [Security Response SLA](docs/SLA.md): acknowledgment **< 24 h**, patches **< 14 days (High)** / **< 30 days (Medium)**, and coordinated disclosure after the patch ships.
 
 ---
 
@@ -391,7 +395,7 @@ Each experimental module has its own test suite gated by the same feature flag; 
 
 ## Contributing
 
-We welcome pull requests for new educational scenarios, additional test coverage, performance wins, and documentation. Please read `CONTRIBUTING.md` (when present) and:
+We welcome pull requests for new educational scenarios, additional test coverage, performance wins, and documentation. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) — which also acknowledges our [Security Response SLA](docs/SLA.md) for security disclosures — and:
 
 1. Run `cargo fmt --all` before pushing.
 2. Add tests for any new entry point.
