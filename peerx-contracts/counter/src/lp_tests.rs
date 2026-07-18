@@ -230,3 +230,61 @@ fn test_invalid_fee_tier() {
 
     client.register_pool(&admin, &token_a, &token_b, &1000, &1000, &100);
 }
+
+// ===== MULTI-POOL PER PAIR TESTS (Issue #1) =====
+
+/// Register two XLM/USDC pools at different depths; `find_best_route`
+/// should choose the pool that returns a higher output for the given
+/// `amount_in`.
+#[test]
+fn test_two_pools_same_pair_route_chooses_optimal() {
+    let env = Env::default();
+    let contract_id = env.register(CounterContract, ());
+    let client = CounterContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    let xlm = symbol_short!("XLM");
+    let usdc = symbol_short!("USDC");
+
+    // Pool A: shallow — 1 000 XLM / 1 000 USDC (fee tier 1 bps)
+    let pool_a = client.register_pool(&admin, &xlm, &usdc, &1000, &1000, &1);
+    // Pool B: deep   — 100 000 XLM / 100 000 USDC (fee tier 30 bps)
+    // A deep pool produces more output per unit because price impact is lower.
+    let pool_b = client.register_pool(&admin, &xlm, &usdc, &100000, &100000, &30);
+
+    assert_ne!(pool_a, pool_b, "two distinct pool IDs must be assigned");
+
+    let amount_in: i128 = 100;
+    let route = client.find_best_route(&xlm, &usdc, &amount_in);
+    assert!(route.is_some(), "a direct route must be found");
+
+    let r = route.unwrap();
+    assert_eq!(r.pools.len(), 1, "direct route uses exactly one pool");
+
+    // The optimal pool for 100 XLM is the deep pool (pool_b) because the
+    // shallow pool suffers a much larger price impact.
+    let chosen_pool = r.pools.get(0).unwrap();
+    assert_eq!(
+        chosen_pool, pool_b,
+        "find_best_route should pick the deep pool (pool_b) for lower price impact"
+    );
+}
+
+/// Registering a second pool for the same pair must succeed (no duplicate rejection).
+#[test]
+fn test_register_second_pool_same_pair_succeeds() {
+    let env = Env::default();
+    let contract_id = env.register(CounterContract, ());
+    let client = CounterContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    let tok_a = symbol_short!("TOKA");
+    let tok_b = symbol_short!("TOKB");
+
+    let id1 = client.register_pool(&admin, &tok_a, &tok_b, &500, &500, &1);
+    let id2 = client.register_pool(&admin, &tok_a, &tok_b, &5000, &5000, &5);
+
+    assert_ne!(id1, id2);
+    assert!(client.get_pool(&id1).is_some());
+    assert!(client.get_pool(&id2).is_some());
+}
