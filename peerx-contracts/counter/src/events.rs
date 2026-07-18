@@ -8,7 +8,37 @@ pub struct BadgeEvent {
     pub timestamp: i64,
 }
 
+/// On-chain histogram of swap sizes.  Published as a `SwapDistribution` event
+/// every `SWAP_DISTRIBUTION_CADENCE` swaps (default 1 000) or on admin
+/// trigger via `emit_swap_distribution`.
+///
+/// Buckets (inclusive lower, exclusive upper):
+///   • `size_0_100`    — [0,   100)
+///   • `size_100_1k`   — [100, 1 000)
+///   • `size_1k_10k`   — [1 000, 10 000)
+///   • `size_10k_plus` — [10 000, ∞)
+#[contracttype]
+#[derive(Clone)]
+pub struct SwapDistribution {
+    pub size_0_100: u64,
+    pub size_100_1k: u64,
+    pub size_1k_10k: u64,
+    pub size_10k_plus: u64,
+    /// Total swap count captured in this snapshot.
+    pub total_swaps: u64,
+    pub timestamp: i64,
+}
+
+/// Number of swaps between automatic `SwapDistribution` emissions.
+pub const SWAP_DISTRIBUTION_CADENCE: u64 = 1_000;
+
 const EVENT_BUFFER_KEY: Symbol = Symbol::short("evt_buf");
+/// Persistent key for the global swap counter.
+const SWAP_COUNT_KEY: Symbol = Symbol::short("sw_cnt");
+/// Persistent key for the per-bucket histogram counters (stored as a 4-element
+/// tuple to keep a single storage round-trip).
+/// Layout: (size_0_100, size_100_1k, size_1k_10k, size_10k_plus)
+const SWAP_BUCKETS_KEY: Symbol = Symbol::short("sw_bkt");
 
 pub struct Events;
 
@@ -25,6 +55,93 @@ impl Events {
         env.events().publish(
             (Symbol::new(env, "SwapExecuted"), user, from_token, to_token),
             (from_amount, to_amount, timestamp),
+        );
+    }
+
+    /// Increment the global swap counter and update the size histogram.
+    /// Automatically emits a `SwapDistribution` event when the counter
+    /// crosses a `SWAP_DISTRIBUTION_CADENCE` boundary.
+    pub fn record_swap(env: &Env, amount: i128, timestamp: i64) {
+        // --- update counter ---
+        let prev_count: u64 = env
+            .storage()
+            .instance()
+            .get(&SWAP_COUNT_KEY)
+            .unwrap_or(0u64);
+        let new_count = prev_count.saturating_add(1);
+        env.storage().instance().set(&SWAP_COUNT_KEY, &new_count);
+
+        // --- update bucket histogram ---
+        let (mut b0, mut b1, mut b2, mut b3): (u64, u64, u64, u64) = env
+            .storage()
+            .instance()
+            .get(&SWAP_BUCKETS_KEY)
+            .unwrap_or((0u64, 0u64, 0u64, 0u64));
+        match amount {
+            a if a < 100 => b0 = b0.saturating_add(1),
+            a if a < 1_000 => b1 = b1.saturating_add(1),
+            a if a < 10_000 => b2 = b2.saturating_add(1),
+            _ => b3 = b3.saturating_add(1),
+        }
+        env.storage()
+            .instance()
+            .set(&SWAP_BUCKETS_KEY, &(b0, b1, b2, b3));
+
+        // --- auto-emit on cadence boundary ---
+        if new_count % SWAP_DISTRIBUTION_CADENCE == 0 {
+            Self::emit_swap_distribution_inner(env, b0, b1, b2, b3, new_count, timestamp);
+        }
+    }
+
+    /// Admin-triggered emission of the current swap distribution histogram.
+    /// Resets buckets after emission so each window is independent.
+    /// Caller must have already been authorized before calling this function.
+    pub fn emit_swap_distribution(env: &Env, _admin: Address, timestamp: i64) {
+        let total_swaps: u64 = env
+            .storage()
+            .instance()
+            .get(&SWAP_COUNT_KEY)
+            .unwrap_or(0u64);
+        let (b0, b1, b2, b3): (u64, u64, u64, u64) = env
+            .storage()
+            .instance()
+            .get(&SWAP_BUCKETS_KEY)
+            .unwrap_or((0u64, 0u64, 0u64, 0u64));
+        Self::emit_swap_distribution_inner(env, b0, b1, b2, b3, total_swaps, timestamp);
+        // Reset buckets after manual flush so the next window starts fresh.
+        env.storage()
+            .instance()
+            .set(&SWAP_BUCKETS_KEY, &(0u64, 0u64, 0u64, 0u64));
+    }
+
+    /// Returns the current swap counter (useful for tests / analytics).
+    pub fn swap_count(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&SWAP_COUNT_KEY)
+            .unwrap_or(0u64)
+    }
+
+    fn emit_swap_distribution_inner(
+        env: &Env,
+        b0: u64,
+        b1: u64,
+        b2: u64,
+        b3: u64,
+        total_swaps: u64,
+        timestamp: i64,
+    ) {
+        let distribution = SwapDistribution {
+            size_0_100: b0,
+            size_100_1k: b1,
+            size_1k_10k: b2,
+            size_10k_plus: b3,
+            total_swaps,
+            timestamp,
+        };
+        env.events().publish(
+            (Symbol::new(env, "SwapDistribution"),),
+            distribution,
         );
     }
 

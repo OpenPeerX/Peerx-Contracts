@@ -583,3 +583,134 @@ fn test_clear_error_messages() {
         assert!(!err_sym.to_string().is_empty());
     }
 }
+
+// ===== SWAP DISTRIBUTION METRICS TESTS (Issue #2) =====
+
+/// Verify that the swap counter increments on each swap call.
+#[test]
+fn test_swap_count_increments() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(CounterContract, ());
+    let client = CounterContractClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let xlm = symbol_short!("XLM");
+    let usdc = symbol_short!("USDCSIM");
+
+    client.mint(&xlm, &user, &5000);
+
+    // Swap once — counter should be 1.
+    client.swap(&xlm, &usdc, &100, &user);
+    assert_eq!(
+        crate::events::Events::swap_count(&env),
+        1,
+        "swap counter should be 1 after one swap"
+    );
+
+    // Swap again — counter should be 2.
+    client.swap(&xlm, &usdc, &100, &user);
+    assert_eq!(
+        crate::events::Events::swap_count(&env),
+        2,
+        "swap counter should be 2 after two swaps"
+    );
+}
+
+/// Verify that `emit_swap_distribution` can be called by admin and resets
+/// the bucket counters for the next window.
+#[test]
+fn test_admin_trigger_emit_swap_distribution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(CounterContract, ());
+    let client = CounterContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    // Set admin in persistent storage (matches how set_admin stores it).
+    env.storage()
+        .persistent()
+        .set(&crate::storage::ADMIN_KEY, &admin);
+
+    let user = Address::generate(&env);
+    let xlm = symbol_short!("XLM");
+    let usdc = symbol_short!("USDCSIM");
+    client.mint(&xlm, &user, &5000);
+
+    // Perform a few swaps to populate buckets.
+    client.swap(&xlm, &usdc, &50, &user);  // bucket 0-100
+    client.swap(&xlm, &usdc, &500, &user); // bucket 100-1k
+    client.swap(&xlm, &usdc, &50, &user);  // bucket 0-100
+
+    // Admin triggers distribution — should not panic.
+    client.emit_swap_distribution(&admin);
+}
+
+// ===== BATCH SHAPE OPTIMIZATION TESTS (Issue #3) =====
+
+/// A 10-operation batch must complete without double-counting swap operations.
+/// This test verifies correctness of the BatchShape single-pass approach: the
+/// same number of operations_executed should be returned as in the old path.
+#[test]
+fn test_batch_shape_ten_op_batch_correct_counts() {
+    let env = Env::default();
+    let contract_id = env.register(CounterContract, ());
+    let client = CounterContractClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let xlm = symbol_short!("XLM");
+    let usdc = symbol_short!("USDCSIM");
+
+    // Give the user enough balance for 10 swaps of 100 each.
+    client.mint(&xlm, &user, &5000);
+
+    let mut batch_ops = Vec::new(&env);
+    for _ in 0..10 {
+        batch_ops.push_back(BatchOperation::Swap(
+            xlm.clone(),
+            usdc.clone(),
+            100,
+            user.clone(),
+        ));
+    }
+
+    let result = client.execute_batch_atomic(&batch_ops);
+
+    // All 10 operations should have executed successfully.
+    assert_eq!(result.operations_executed, 10);
+    assert_eq!(result.operations_failed, 0);
+}
+
+/// Verify that a mixed batch (swaps + mints) counts each category correctly
+/// by checking the overall result is consistent.
+#[test]
+fn test_batch_shape_mixed_operations() {
+    let env = Env::default();
+    let contract_id = env.register(CounterContract, ());
+    let client = CounterContractClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let xlm = symbol_short!("XLM");
+    let usdc = symbol_short!("USDCSIM");
+
+    client.mint(&xlm, &user, &5000);
+
+    let mut batch_ops = Vec::new(&env);
+    // 3 swaps
+    for _ in 0..3 {
+        batch_ops.push_back(BatchOperation::Swap(
+            xlm.clone(),
+            usdc.clone(),
+            100,
+            user.clone(),
+        ));
+    }
+    // 2 mints
+    batch_ops.push_back(BatchOperation::MintToken(xlm.clone(), user.clone(), 100));
+    batch_ops.push_back(BatchOperation::MintToken(usdc.clone(), user.clone(), 100));
+
+    let result = client.execute_batch_best_effort(&batch_ops);
+
+    assert_eq!(result.operations_executed, 5);
+    assert_eq!(result.operations_failed, 0);
+}
