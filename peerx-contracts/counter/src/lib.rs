@@ -1,6 +1,7 @@
 #![cfg_attr(all(not(test), target_family = "wasm"), no_std)]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, Env, IntoVal, Map, Symbol,
+    TryFromVal, Val, Vec,
 };
 
 // Bring in modules from parent directory
@@ -168,7 +169,27 @@ pub use tiers::UserTier;
 use trading::perform_swap;
 
 use crate::errors::{ContractError, PeerXError};
-use crate::storage::{ADMIN_KEY, PAUSED_KEY};
+use crate::storage::{ADMIN_KEY, PAUSED_KEY, READ_ONLY_ROLE_KEY};
+
+/// Checks `role` against the durably-stored read-only auditor/dashboard
+/// role set via `CounterContract::set_read_only_role`. Deliberately does
+/// NOT call `role.require_auth()` - the whole point of `invoke_read` is
+/// letting auditors/dashboards reach read-only entry points without
+/// submitting a signed transaction of their own; the admin-curated
+/// allowlist plus this identity check are the only gate.
+fn require_read_only_role(env: &Env, role: &Address) -> Result<(), PeerXError> {
+    let stored: Address = env
+        .storage()
+        .persistent()
+        .get(&READ_ONLY_ROLE_KEY)
+        .ok_or(PeerXError::NotReadOnlyRole)?;
+
+    if stored == *role {
+        Ok(())
+    } else {
+        Err(PeerXError::NotReadOnlyRole)
+    }
+}
 
 pub(crate) fn require_verified_user(env: &Env, user: &Address) -> Result<(), ContractError> {
     kyc::KYCSystem::require_verified(env, user)
@@ -1524,9 +1545,67 @@ impl CounterContract {
     pub fn withdraw_commission(env: Env, user: Address) -> i128 {
         referral_system::withdraw_commission(&env, user)
     }
+
+    // ── Read-Only Access ─────────────────────────────────────────────────────
+
+    /// Grant (or replace) the read-only auditor/dashboard role (admin only).
+    /// Durable. The granted address can call `invoke_read` to reach
+    /// read-only entry points without submitting a signed transaction of
+    /// its own - see `invoke_read` for why that's safe.
+    pub fn set_read_only_role(env: Env, caller: Address, role: Address) -> Result<(), PeerXError> {
+        caller.require_auth();
+        crate::admin::require_admin(&env, &caller)?;
+        env.storage().persistent().set(&READ_ONLY_ROLE_KEY, &role);
+        crate::events::Events::read_only_role_set(&env, caller, role, env.ledger().timestamp());
+        Ok(())
+    }
+
+    /// Dispatch a read-only call by function name for the configured
+    /// read-only role, without that caller needing to sign/authenticate.
+    ///
+    /// `fn_name` must be one of a fixed, curated allowlist of genuinely
+    /// read-only entry points - every mutating entry point (swap, mint,
+    /// add_liquidity, ...) is absent from that allowlist by construction,
+    /// so no argument or role can ever reach state-mutating logic through
+    /// this path. Unrecognized names return `UnsupportedReadOnlyFunction`.
+    pub fn invoke_read(env: Env, role: Address, fn_name: Symbol, args: Vec<Val>) -> Result<Val, PeerXError> {
+        require_read_only_role(&env, &role)?;
+
+        if fn_name == Symbol::new(&env, "get_metrics") {
+            return Ok(Self::get_metrics(env.clone()).into_val(&env));
+        }
+
+        if fn_name == Symbol::new(&env, "balance_of") {
+            let token_val = args.get(0).ok_or(PeerXError::InvalidReadArgs)?;
+            let user_val = args.get(1).ok_or(PeerXError::InvalidReadArgs)?;
+            let token =
+                Symbol::try_from_val(&env, &token_val).map_err(|_| PeerXError::InvalidReadArgs)?;
+            let user =
+                Address::try_from_val(&env, &user_val).map_err(|_| PeerXError::InvalidReadArgs)?;
+            return Ok(Self::balance_of(env.clone(), token, user).into_val(&env));
+        }
+
+        if fn_name == Symbol::new(&env, "get_portfolio") {
+            let user_val = args.get(0).ok_or(PeerXError::InvalidReadArgs)?;
+            let user =
+                Address::try_from_val(&env, &user_val).map_err(|_| PeerXError::InvalidReadArgs)?;
+            return Ok(Self::get_portfolio(env.clone(), user).into_val(&env));
+        }
+
+        if fn_name == Symbol::new(&env, "get_user_tier") {
+            let user_val = args.get(0).ok_or(PeerXError::InvalidReadArgs)?;
+            let user =
+                Address::try_from_val(&env, &user_val).map_err(|_| PeerXError::InvalidReadArgs)?;
+            return Ok(Self::get_user_tier(env.clone(), user).into_val(&env));
+        }
+
+        Err(PeerXError::UnsupportedReadOnlyFunction)
+    }
 }
 
 #[cfg(all(test, feature = "experimental"))]
 mod migration_tests;
 mod risk_management_tests;
 mod governance_tests;
+#[cfg(test)]
+mod read_only_role_tests;

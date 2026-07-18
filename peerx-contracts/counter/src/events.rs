@@ -103,6 +103,19 @@ impl Events {
         env.events()
             .publish((Symbol::new(env, "AdminResumed"), admin), (timestamp,));
     }
+
+    /// Emitted when the admin grants (or replaces) the read-only
+    /// auditor/dashboard role. Used to track access-control changes to the
+    /// `invoke_read` dispatch path.
+    ///
+    /// Topic  : ("ReadOnlyRoleSet", admin_address)
+    /// Payload: (role_address, timestamp)
+    pub fn read_only_role_set(env: &Env, admin: Address, role: Address, timestamp: u64) {
+        env.events().publish(
+            (Symbol::new(env, "ReadOnlyRoleSet"), admin),
+            (role, timestamp),
+        );
+    }
 }
 
 /// Emitted whenever an alert fires. Carries enough metadata for an

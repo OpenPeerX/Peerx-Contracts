@@ -17,6 +17,15 @@ use soroban_sdk::contracterror;
 pub enum PeerXError {
     // ── Admin / access control ──────────────────────────────────────────────
     NotAdmin = 1,
+    /// Caller is not the currently configured read-only role (see
+    /// `set_read_only_role` / `invoke_read`).
+    NotReadOnlyRole = 2,
+    /// Arguments passed to `invoke_read` didn't decode into the shape the
+    /// target read-only function expects.
+    InvalidReadArgs = 3,
+    /// `invoke_read`'s `fn_name` isn't on the read-only allowlist - this
+    /// includes every mutating entry point, by construction.
+    UnsupportedReadOnlyFunction = 4,
 
     // ── Trading / contract state ────────────────────────────────────────────
     TradingPaused = 10,
