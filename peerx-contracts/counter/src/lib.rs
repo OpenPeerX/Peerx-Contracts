@@ -2,6 +2,8 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Symbol, Vec,
 };
+#[cfg(feature = "experimental")]
+use soroban_sdk::Bytes;
 
 // Bring in modules from parent directory
 mod admin;
@@ -156,7 +158,7 @@ pub use zkp_proof_generation::ProofGenerator;
 #[cfg(feature = "experimental")]
 pub use zkp_types::{
     AuditEventType, AuditLogEntry, BalanceProof, Commitment, PrivateTransaction, ProofScheme,
-    ProofVerificationResult, RangeProof, TransactionWitness, ZKProof,
+    ProofVerificationResult, RangeProof, Receipt, TransactionWitness, ZKProof,
 };
 #[cfg(feature = "experimental")]
 pub use zkp_verification::ProofVerifier;
@@ -1524,9 +1526,24 @@ impl CounterContract {
     pub fn withdraw_commission(env: Env, user: Address) -> i128 {
         referral_system::withdraw_commission(&env, user)
     }
+
+    // ── Zero-Knowledge Privacy ───────────────────────────────────────────────
+
+    /// Fetch the audit-friendly receipt for a private transaction, by its
+    /// transaction hash. Public: off-chain consumers (indexers, compliance
+    /// tooling) use this to verify a private transaction occurred without
+    /// the contract exposing the underlying private witness values.
+    ///
+    /// Returns `ZKPError::ProofNotFound` for an empty or unrecognized hash.
+    #[cfg(feature = "experimental")]
+    pub fn private_tx_receipt(env: Env, tx_hash: Bytes) -> Result<Receipt, ZKPError> {
+        zkp_verification::receipts::get_receipt(&env, tx_hash)
+    }
 }
 
 #[cfg(all(test, feature = "experimental"))]
 mod migration_tests;
+#[cfg(all(test, feature = "experimental"))]
+mod zkp_receipt_tests;
 mod risk_management_tests;
 mod governance_tests;

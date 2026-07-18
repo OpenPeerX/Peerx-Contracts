@@ -203,6 +203,107 @@ pub mod middleware {
     }
 }
 
+/// Audit receipt issuance and lookup for private transactions.
+///
+/// Receipts are the audit-friendly artifact off-chain consumers (indexers,
+/// compliance tooling) query instead of reconstructing a private
+/// transaction's internals. Storage is keyed by transaction hash so lookups
+/// don't require scanning; `issue_receipt` is the only writer, called once
+/// a private transaction has been processed.
+pub mod receipts {
+    use soroban_sdk::{symbol_short, Bytes, Env, Symbol};
+
+    use crate::zkp_errors::ZKPError;
+    use crate::zkp_types::{Receipt, ZKProof};
+
+    const RECEIPT_PREFIX: Symbol = symbol_short!("zkprcpt");
+
+    /// Durably records an audit-friendly receipt for a private transaction,
+    /// keyed by `tx_hash`. `witness_hash` must be a hash/commitment of the
+    /// witness, not the raw witness values.
+    pub fn issue_receipt(
+        env: &Env,
+        tx_hash: &Bytes,
+        commitment: Bytes,
+        witness_hash: Bytes,
+        proof: ZKProof,
+    ) {
+        let receipt = Receipt {
+            commitment,
+            witness: witness_hash,
+            proof,
+            timestamp: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&(RECEIPT_PREFIX, tx_hash.clone()), &receipt);
+    }
+
+    /// Fetches the audit receipt for `tx_hash`.
+    ///
+    /// Returns `ZKPError::ProofNotFound` for an empty or unrecognized hash.
+    pub fn get_receipt(env: &Env, tx_hash: Bytes) -> Result<Receipt, ZKPError> {
+        if tx_hash.is_empty() {
+            return Err(ZKPError::ProofNotFound);
+        }
+
+        env.storage()
+            .persistent()
+            .get(&(RECEIPT_PREFIX, tx_hash))
+            .ok_or(ZKPError::ProofNotFound)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn empty_hash_returns_proof_not_found() {
+            let env = Env::default();
+            let empty_hash = Bytes::new(&env);
+
+            assert_eq!(get_receipt(&env, empty_hash), Err(ZKPError::ProofNotFound));
+        }
+
+        #[test]
+        fn unknown_hash_returns_proof_not_found() {
+            let env = Env::default();
+            let unknown_hash = Bytes::from_array(&env, &[9u8; 32]);
+
+            assert_eq!(
+                get_receipt(&env, unknown_hash),
+                Err(ZKPError::ProofNotFound)
+            );
+        }
+
+        #[test]
+        fn issued_receipt_round_trips_with_all_fields() {
+            let env = Env::default();
+            let tx_hash = Bytes::from_array(&env, &[1u8; 32]);
+            let commitment = Bytes::from_array(&env, &[2u8; 32]);
+            let witness_hash = Bytes::from_array(&env, &[3u8; 32]);
+            let proof = ZKProof {
+                proof_data: Bytes::from_array(&env, &[4u8; 32]),
+                scheme: crate::zkp_types::ProofScheme::Bulletproof,
+            };
+
+            issue_receipt(
+                &env,
+                &tx_hash,
+                commitment.clone(),
+                witness_hash.clone(),
+                proof.clone(),
+            );
+
+            let receipt = get_receipt(&env, tx_hash).unwrap();
+            assert_eq!(receipt.commitment, commitment);
+            assert_eq!(receipt.witness, witness_hash);
+            assert_eq!(receipt.proof.proof_data, proof.proof_data);
+            assert_eq!(receipt.proof.scheme, proof.scheme);
+        }
+    }
+}
+
 /// State management for proof verification
 pub mod state {
     use soroban_sdk::{symbol_short, Bytes, Env, Map, Symbol};
