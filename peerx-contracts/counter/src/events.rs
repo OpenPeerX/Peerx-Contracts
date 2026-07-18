@@ -1,5 +1,7 @@
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
+use crate::observability::{log, LogLevel};
+
 #[contracttype]
 #[derive(Clone)]
 pub struct BadgeEvent {
@@ -22,7 +24,9 @@ impl Events {
         user: Address,
         timestamp: i64,
     ) {
-        env.events().publish(
+        log(
+            env,
+            LogLevel::Info,
             (Symbol::new(env, "SwapExecuted"), user, from_token, to_token),
             (from_amount, to_amount, timestamp),
         );
@@ -36,7 +40,9 @@ impl Events {
         user: Address,
         timestamp: i64,
     ) {
-        env.events().publish(
+        log(
+            env,
+            LogLevel::Info,
             (Symbol::new(env, "LiquidityAdded"), user),
             (xlm_amount, usdc_amount, lp_tokens_minted, timestamp),
         );
@@ -50,7 +56,9 @@ impl Events {
         user: Address,
         timestamp: i64,
     ) {
-        env.events().publish(
+        log(
+            env,
+            LogLevel::Info,
             (Symbol::new(env, "LiquidityRemoved"), user),
             (xlm_amount, usdc_amount, lp_tokens_burned, timestamp),
         );
@@ -74,8 +82,12 @@ impl Events {
         let buffer: Option<Vec<BadgeEvent>> = env.storage().temporary().get(&EVENT_BUFFER_KEY);
         if let Some(events) = buffer {
             if !events.is_empty() {
-                env.events()
-                    .publish((Symbol::new(env, "BadgesAwarded"),), events);
+                log(
+                    env,
+                    LogLevel::Info,
+                    (Symbol::new(env, "BadgesAwarded"),),
+                    events,
+                );
                 env.storage().temporary().remove(&EVENT_BUFFER_KEY);
             }
         }
@@ -88,20 +100,30 @@ impl Events {
         new_tier: crate::tiers::UserTier,
         timestamp: i64,
     ) {
-        env.events().publish(
+        log(
+            env,
+            LogLevel::Info,
             (Symbol::new(env, "UserTierChanged"), user),
             (old_tier, new_tier, timestamp),
         );
     }
 
     pub fn admin_paused(env: &Env, admin: Address, timestamp: i64) {
-        env.events()
-            .publish((Symbol::new(env, "AdminPaused"), admin), (timestamp,));
+        log(
+            env,
+            LogLevel::Warn,
+            (Symbol::new(env, "AdminPaused"), admin),
+            (timestamp,),
+        );
     }
 
     pub fn admin_resumed(env: &Env, admin: Address, timestamp: i64) {
-        env.events()
-            .publish((Symbol::new(env, "AdminResumed"), admin), (timestamp,));
+        log(
+            env,
+            LogLevel::Warn,
+            (Symbol::new(env, "AdminResumed"), admin),
+            (timestamp,),
+        );
     }
 }
 
@@ -125,7 +147,9 @@ pub fn alert_triggered(
     notification_method_tag: Symbol,
     timestamp: u64,
 ) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Warn,
         (Symbol::new(env, "AlertTriggered"), owner, alert_id),
         (kind_tag, notification_method_tag, timestamp),
     );
@@ -137,7 +161,9 @@ pub fn alert_triggered(
 /// Topic  : ("AlertCreated", owner_address, alert_id)
 /// Payload: (kind_tag, expires_at)
 pub fn alert_created(env: &Env, owner: Address, alert_id: u64, kind_tag: Symbol, expires_at: u64) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Info,
         (Symbol::new(env, "AlertCreated"), owner, alert_id),
         (kind_tag, expires_at),
     );
@@ -158,7 +184,9 @@ pub fn performance_metrics_calculated(
     max_drawdown: u128,
     timestamp: i64,
 ) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Debug,
         (Symbol::new(env, "PerformanceMetricsCalculated"), user),
         (time_window, sharpe_ratio, max_drawdown, timestamp),
     );
@@ -178,7 +206,9 @@ pub fn asset_allocation_analyzed(
     diversification_score: u128,
     timestamp: i64,
 ) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Debug,
         (Symbol::new(env, "AssetAllocationAnalyzed"), user),
         (total_assets, diversification_score, timestamp),
     );
@@ -199,7 +229,9 @@ pub fn benchmark_comparison_calculated(
     beta: u128,
     timestamp: i64,
 ) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Debug,
         (
             Symbol::new(env, "BenchmarkComparisonCalculated"),
             user,
@@ -224,7 +256,9 @@ pub fn period_returns_calculated(
     time_weighted_return: i128,
     timestamp: i64,
 ) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Debug,
         (Symbol::new(env, "PeriodReturnsCalculated"), user),
         (
             start_timestamp,
@@ -247,7 +281,9 @@ pub fn network_congestion_changed(
     capacity_utilization: u32,
     timestamp: u64,
 ) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Warn,
         (Symbol::new(env, "NetworkCongestionChanged"),),
         (previous_level, new_level, capacity_utilization, timestamp),
     );
@@ -266,7 +302,9 @@ pub fn fee_adjustment_applied(
     congestion_level: Symbol,
     timestamp: u64,
 ) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Info,
         (Symbol::new(env, "FeeAdjustmentApplied"),),
         (
             previous_fee_bps,
@@ -289,7 +327,9 @@ pub fn emergency_fee_override_activated(
     reason: Symbol,
     timestamp: u64,
 ) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Error,
         (Symbol::new(env, "EmergencyFeeOverrideActivated"),),
         (fee_cap_bps, reason, timestamp),
     );
@@ -301,7 +341,9 @@ pub fn emergency_fee_override_activated(
 /// Topic  : ("EmergencyFeeOverrideDeactivated",)
 /// Payload: (timestamp,)
 pub fn emergency_fee_override_deactivated(env: &Env, timestamp: u64) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Warn,
         (Symbol::new(env, "EmergencyFeeOverrideDeactivated"),),
         (timestamp,),
     );
@@ -313,7 +355,9 @@ pub fn emergency_fee_override_deactivated(env: &Env, timestamp: u64) {
 /// Topic  : ("FeeConfigurationUpdated",)
 /// Payload: (admin_address, config_change_tag, timestamp)
 pub fn fee_configuration_updated(env: &Env, admin: Address, change_type: Symbol, timestamp: u64) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Info,
         (Symbol::new(env, "FeeConfigurationUpdated"), admin),
         (change_type, timestamp),
     );
@@ -332,7 +376,9 @@ pub fn fee_statistics_report(
     volatility: u32,
     timestamp: u64,
 ) {
-    env.events().publish(
+    log(
+        env,
+        LogLevel::Debug,
         (Symbol::new(env, "FeeStatisticsReport"),),
         (avg_fee_bps, min_fee_bps, max_fee_bps, volatility, timestamp),
     );

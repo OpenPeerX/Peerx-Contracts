@@ -16,6 +16,9 @@ mod kyc;
 #[cfg(test)]
 mod kyc_tests;
 mod liquidity_pool;
+mod observability;
+#[cfg(test)]
+mod observability_tests;
 mod rate_limit;
 mod state_snapshot;
 #[cfg(test)]
@@ -162,6 +165,7 @@ pub use zkp_types::{
 pub use zkp_verification::ProofVerifier;
 
 use portfolio::{Asset, CachedPortfolio, CachedTopTraders, LPPosition, Portfolio};
+pub use observability::LogLevel;
 pub use portfolio::{Badge, Metrics, Transaction};
 pub use rate_limit::{RateLimitStatus, RateLimiter};
 pub use tiers::UserTier;
@@ -460,13 +464,14 @@ impl CounterContract {
         // Flush batched badge events
         crate::events::Events::flush_badge_events(&env);
 
-        // Optional structured logging for successful swap
-        #[cfg(feature = "logging")]
-        {
-            use soroban_sdk::symbol_short;
-            env.events()
-                .publish((symbol_short!("swap")), (amount, out_amount));
-        }
+        // Structured logging for successful swap, gated by the admin-set
+        // log level (see observability.rs) rather than a compile-time flag.
+        observability::log(
+            &env,
+            observability::LogLevel::Debug,
+            (symbol_short!("swap"),),
+            (amount, out_amount),
+        );
 
         Ok(out_amount)
     }
@@ -494,12 +499,12 @@ impl CounterContract {
             env.storage().instance().set(&(), &portfolio);
             invalidate_query_cache(&env);
 
-            #[cfg(feature = "logging")]
-            {
-                use soroban_sdk::symbol_short;
-                env.events()
-                    .publish((symbol_short!("fail"), user.clone()), (from, to, amount));
-            }
+            observability::log(
+                &env,
+                observability::LogLevel::Warn,
+                (symbol_short!("fail"), user.clone()),
+                (from, to, amount),
+            );
             return 0;
         }
 
@@ -511,12 +516,12 @@ impl CounterContract {
         // Flush batched badge events
         crate::events::Events::flush_badge_events(&env);
 
-        #[cfg(feature = "logging")]
-        {
-            use soroban_sdk::symbol_short;
-            env.events()
-                .publish((symbol_short!("swap")), (amount, out_amount));
-        }
+        observability::log(
+            &env,
+            observability::LogLevel::Debug,
+            (symbol_short!("swap"),),
+            (amount, out_amount),
+        );
 
         out_amount
     }
@@ -626,6 +631,20 @@ impl CounterContract {
         crate::admin::require_admin(&env, &caller)?;
         env.storage().instance().set(&CACHE_TTL_KEY, &ttl_seconds);
         Ok(())
+    }
+
+    // ===== OBSERVABILITY =====
+
+    /// Set the minimum event log level (admin only). Durable across calls
+    /// and upgrades; overrides the compiled per-network default (Debug on
+    /// dev, Info on testnet, Warn on mainnet). See src/observability.rs.
+    pub fn set_log_level(env: Env, caller: Address, level: LogLevel) -> Result<(), PeerXError> {
+        observability::set_log_level(&env, caller, level)
+    }
+
+    /// Get the currently effective minimum event log level.
+    pub fn get_log_level(env: Env) -> LogLevel {
+        observability::get_log_level(&env)
     }
 
     /// Get cache stats as (hits, misses, hit_ratio_bps).
