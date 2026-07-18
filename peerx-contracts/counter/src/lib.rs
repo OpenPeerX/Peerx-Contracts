@@ -226,6 +226,41 @@ fn save_pool_registry(env: &Env, registry: &PoolRegistry) {
     env.storage().instance().set(&POOL_REGISTRY_KEY, registry);
 }
 
+/// Pre-computed shape of a batch — produced in a single pass over the
+/// operation vec so no part of the hot path needs to iterate it twice.
+struct BatchShape {
+    swap_count: u32,
+    mint_count: u32,
+    lp_add_count: u32,
+    lp_remove_count: u32,
+}
+
+impl BatchShape {
+    /// Build a `BatchShape` in one O(n) pass over `operations`.
+    fn compute(operations: &Vec<BatchOperation>) -> Self {
+        let mut swap_count = 0u32;
+        let mut mint_count = 0u32;
+        let mut lp_add_count = 0u32;
+        let mut lp_remove_count = 0u32;
+        for i in 0..operations.len() {
+            if let Some(op) = operations.get(i) {
+                match op {
+                    BatchOperation::Swap(_, _, _, _) => swap_count += 1,
+                    BatchOperation::MintToken(_, _, _) => mint_count += 1,
+                    BatchOperation::AddLiquidity(_, _, _) => lp_add_count += 1,
+                    BatchOperation::RemoveLiquidity(_, _, _) => lp_remove_count += 1,
+                }
+            }
+        }
+        Self {
+            swap_count,
+            mint_count,
+            lp_add_count,
+            lp_remove_count,
+        }
+    }
+}
+
 #[derive(Clone)]
 #[contracttype]
 struct CacheHitMetrics {
@@ -450,6 +485,9 @@ impl CounterContract {
         );
 
         portfolio.record_trade(&env, user.clone());
+
+        // Update swap distribution metrics (auto-emits event every 1 000 swaps).
+        crate::events::Events::record_swap(&env, amount, env.ledger().timestamp() as i64);
 
         // Record daily portfolio value for analytics
         portfolio.record_daily_portfolio_value(&env, user.clone(), env.ledger().timestamp());
@@ -729,6 +767,22 @@ impl CounterContract {
         RateLimiter::cleanup_rate_limits(&env, &user)
     }
 
+    // ===== OBSERVABILITY =====
+
+    /// Admin-triggered emission of the current swap-size histogram.
+    /// Useful when the automatic 1 000-swap cadence has not been reached yet
+    /// but fresh metrics are needed (e.g., before a protocol upgrade).
+    pub fn emit_swap_distribution(env: Env, admin: Address) {
+        admin.require_auth();
+        crate::admin::require_admin(&env, &admin)
+            .expect("only admin may trigger swap distribution");
+        crate::events::Events::emit_swap_distribution(
+            &env,
+            admin,
+            env.ledger().timestamp() as i64,
+        );
+    }
+
     // ===== BATCH OPERATIONS =====
 
     pub fn execute_batch_atomic(env: Env, operations: Vec<BatchOperation>) -> BatchResult {
@@ -764,12 +818,14 @@ impl CounterContract {
             .get(&())
             .unwrap_or_else(|| Portfolio::new(&env));
 
+        // Pre-compute batch shape in a single pass — reused below for both the
+        // rate-limit check and the rate-limit recording step (Issue #3).
+        let shape = BatchShape::compute(&operations);
+
         // Check rate limiting for batch operations with swaps
         if let Some(caller_addr) = &caller {
             let user_tier = portfolio.get_user_tier(&env, caller_addr.clone());
-            // Count swap operations in batch
-            let swap_count = operations.iter().filter(|op| matches!(op, BatchOperation::Swap(_, _, _, _))).count();
-            if swap_count > 0 {
+            if shape.swap_count > 0 {
                 // Apply rate limit check for batch swaps
                 if RateLimiter::check_swap_limit(&env, caller_addr, &user_tier).is_err() {
                     let mut result = BatchResult::new(&env);
@@ -785,10 +841,9 @@ impl CounterContract {
             Ok(res) => {
                 env.storage().instance().set(&(), &portfolio);
                 
-                // Record rate limit usage for executed swaps
+                // Record rate limit usage for executed swaps — reuse pre-computed shape.
                 if let Some(caller_addr) = &caller {
-                    let swap_count = operations.iter().filter(|op| matches!(op, BatchOperation::Swap(_, _, _, _))).count();
-                    if swap_count > 0 && res.operations_executed > 0 {
+                    if shape.swap_count > 0 && res.operations_executed > 0 {
                         for _ in 0..res.operations_executed {
                             RateLimiter::record_swap_op(&env, caller_addr, env.ledger().timestamp());
                         }
@@ -840,12 +895,14 @@ impl CounterContract {
             .get(&())
             .unwrap_or_else(|| Portfolio::new(&env));
 
+        // Pre-compute batch shape in a single pass — reused below for both the
+        // rate-limit check and the rate-limit recording step (Issue #3).
+        let shape = BatchShape::compute(&operations);
+
         // Check rate limiting for batch operations with swaps
         if let Some(caller_addr) = &caller {
             let user_tier = portfolio.get_user_tier(&env, caller_addr.clone());
-            // Count swap operations in batch
-            let swap_count = operations.iter().filter(|op| matches!(op, BatchOperation::Swap(_, _, _, _))).count();
-            if swap_count > 0 {
+            if shape.swap_count > 0 {
                 // Apply rate limit check for batch swaps
                 if RateLimiter::check_swap_limit(&env, caller_addr, &user_tier).is_err() {
                     let mut result = BatchResult::new(&env);
@@ -861,10 +918,9 @@ impl CounterContract {
             Ok(res) => {
                 env.storage().instance().set(&(), &portfolio);
                 
-                // Record rate limit usage for executed swaps
+                // Record rate limit usage for executed swaps — reuse pre-computed shape.
                 if let Some(caller_addr) = &caller {
-                    let swap_count = operations.iter().filter(|op| matches!(op, BatchOperation::Swap(_, _, _, _))).count();
-                    if swap_count > 0 && res.operations_executed > 0 {
+                    if shape.swap_count > 0 && res.operations_executed > 0 {
                         for _ in 0..res.operations_executed {
                             RateLimiter::record_swap_op(&env, caller_addr, env.ledger().timestamp());
                         }
