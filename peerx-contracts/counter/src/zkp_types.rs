@@ -16,7 +16,7 @@ pub struct Commitment {
 /// Represents a zero-knowledge proof of knowledge
 /// Generic proof structure that can represent different ZKP schemes
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ZKProof {
     /// The proof data
     pub proof_data: Bytes,
@@ -166,6 +166,25 @@ pub struct ProofMetrics {
     pub proof_size_bytes: u32,
     /// Gas used for verification
     pub verification_gas: u64,
+}
+
+/// Audit-friendly receipt for a private transaction, issued for off-chain
+/// consumers (indexers, compliance tooling) so they can verify a private
+/// transaction occurred without the contract exposing the underlying
+/// private witness values.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Receipt {
+    /// Commitment to the transacted amount.
+    pub commitment: Bytes,
+    /// Hash of the transaction witness - never the raw witness, which
+    /// carries private values (amount, sender balance, blinding factors)
+    /// that a private transaction is explicitly meant to keep off-chain.
+    pub witness: Bytes,
+    /// The zero-knowledge proof attached to the transaction.
+    pub proof: ZKProof,
+    /// When the receipt was issued.
+    pub timestamp: u64,
 }
 
 /// Configuration for the ZKP system

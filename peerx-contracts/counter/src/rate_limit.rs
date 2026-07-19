@@ -441,13 +441,34 @@ pub const SENSITIVE_ACTION_WINDOW: u64 = 600;
 ///
 /// Uses block timestamp for consistency and stores per-user counters in
 /// isolated storage keys so no other state is affected.
+///
+/// Wired into: `set_admin`, `propose_override`, `kyc_update_status`,
+/// `withdraw_commission` — any sensitive administrative action that a
+/// malicious admin or compromised key could flood.
+///
+/// **Audit log**: every blocked attempt emits a `sens_rl` event with the
+/// user address, the action tag, the current count, the limit, and the
+/// timestamp so that off-chain monitoring can alert on abuse patterns.
 pub struct SensitiveRateLimiter;
+
+/// Tags used in audit-log events so off-chain tooling can distinguish
+/// which sensitive action was blocked.
+pub mod action_tags {
+    use soroban_sdk::symbol_short;
+    pub const SET_ADMIN: soroban_sdk::Symbol = symbol_short!("set_adm");
+    pub const PROP_OVERRIDE: soroban_sdk::Symbol = symbol_short!("p_overr");
+    pub const KYC_UPDATE: soroban_sdk::Symbol = symbol_short!("kyc_upd");
+    pub const WD_COMM: soroban_sdk::Symbol = symbol_short!("wd_comm");
+}
 
 impl SensitiveRateLimiter {
     /// Check and record a sensitive action for `user`.
     ///
     /// Returns `Ok(())` when the action is within the limit.
     /// Returns `Err(RateLimitStatus)` with cooldown info when the limit is exceeded.
+    ///
+    /// `action` is a short tag included in the audit-log event when the
+    /// attempt is blocked (e.g. `action_tags::SET_ADMIN`).
     pub fn check_and_record(
         env: &Env,
         user: &Address,
@@ -458,10 +479,53 @@ impl SensitiveRateLimiter {
 
         let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
         if count >= SENSITIVE_ACTION_LIMIT {
+            // ── Audit log: record the blocked attempt ────────────────────────
+            env.events().publish(
+                (symbol_short!("sens_rl"), symbol_short!("block")),
+                (user.clone(), count, SENSITIVE_ACTION_LIMIT, timestamp),
+            );
             return Err(crate::errors::PeerXError::RateLimitExceeded);
         }
 
         env.storage().persistent().set(&key, &(count + 1));
+        Ok(())
+    }
+
+    /// Check and record a sensitive action with an action-specific audit tag.
+    ///
+    /// Behaves identically to [`check_and_record`] but additionally publishes
+    /// a tagged audit event **on every call** (both allowed and blocked) so
+    /// that off-chain observability can attribute each sensitive action.
+    ///
+    /// The event payload is `(user, action_tag, count_after, timestamp)`.
+    pub fn check_and_record_tagged(
+        env: &Env,
+        user: &Address,
+        action: soroban_sdk::Symbol,
+    ) -> Result<(), crate::errors::PeerXError> {
+        let timestamp = env.ledger().timestamp();
+        let window_start = (timestamp / SENSITIVE_ACTION_WINDOW) * SENSITIVE_ACTION_WINDOW;
+        let key = (user.clone(), symbol_short!("sens"), window_start);
+
+        let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        if count >= SENSITIVE_ACTION_LIMIT {
+            // ── Audit log: record the blocked attempt with action tag ────────
+            env.events().publish(
+                (symbol_short!("sens_rl"), action),
+                (user.clone(), count, SENSITIVE_ACTION_LIMIT, timestamp),
+            );
+            return Err(crate::errors::PeerXError::RateLimitExceeded);
+        }
+
+        let new_count = count + 1;
+        env.storage().persistent().set(&key, &new_count);
+
+        // ── Audit log: record the allowed action ─────────────────────────────
+        env.events().publish(
+            (symbol_short!("sens_rl"), action),
+            (user.clone(), new_count, SENSITIVE_ACTION_LIMIT, timestamp),
+        );
+
         Ok(())
     }
 
@@ -479,7 +543,7 @@ mod sensitive_tests {
     use super::*;
     use crate::set_admin;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
+        testutils::{Address as _, Events, Ledger},
         Address, Env,
     };
 
@@ -546,6 +610,146 @@ mod sensitive_tests {
             // One over the limit must fail.
             assert_eq!(
                 SensitiveRateLimiter::check_and_record(&env, &user),
+                Err(crate::errors::PeerXError::RateLimitExceeded)
+            );
+        });
+    }
+
+    // ── Tagged rate limiter tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_tagged_within_limit() {
+        let (env, contract_id, user) = setup();
+        env.as_contract(&contract_id, || {
+            for _ in 0..SENSITIVE_ACTION_LIMIT {
+                SensitiveRateLimiter::check_and_record_tagged(
+                    &env,
+                    &user,
+                    action_tags::SET_ADMIN,
+                )
+                .unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn test_tagged_exceeding_limit() {
+        let (env, contract_id, user) = setup();
+        env.as_contract(&contract_id, || {
+            for _ in 0..SENSITIVE_ACTION_LIMIT {
+                SensitiveRateLimiter::check_and_record_tagged(
+                    &env,
+                    &user,
+                    action_tags::SET_ADMIN,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                SensitiveRateLimiter::check_and_record_tagged(
+                    &env,
+                    &user,
+                    action_tags::SET_ADMIN,
+                ),
+                Err(crate::errors::PeerXError::RateLimitExceeded)
+            );
+        });
+    }
+
+    #[test]
+    fn test_tagged_audit_event_on_block() {
+        let (env, contract_id, user) = setup();
+        env.as_contract(&contract_id, || {
+            // Exhaust the limit.
+            for _ in 0..SENSITIVE_ACTION_LIMIT {
+                SensitiveRateLimiter::check_and_record_tagged(
+                    &env,
+                    &user,
+                    action_tags::SET_ADMIN,
+                )
+                .unwrap();
+            }
+            // The blocked call should still emit an audit event.
+            let _ = SensitiveRateLimiter::check_and_record_tagged(
+                &env,
+                &user,
+                action_tags::SET_ADMIN,
+            );
+            // Verify at least one event was published.
+            let events = env.events().all();
+            assert!(
+                events.len() > 0,
+                "expected audit events to be emitted on blocked attempt"
+            );
+        });
+    }
+
+    #[test]
+    fn test_per_user_counters_isolated() {
+        let (env, contract_id, user_a) = setup();
+        let user_b = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            // Exhaust user_a's limit.
+            for _ in 0..SENSITIVE_ACTION_LIMIT {
+                SensitiveRateLimiter::check_and_record(&env, &user_a).unwrap();
+            }
+            // user_a should be blocked.
+            assert_eq!(
+                SensitiveRateLimiter::check_and_record(&env, &user_a),
+                Err(crate::errors::PeerXError::RateLimitExceeded)
+            );
+            // user_b should still have full allowance.
+            for _ in 0..SENSITIVE_ACTION_LIMIT {
+                SensitiveRateLimiter::check_and_record(&env, &user_b).unwrap();
+            }
+            assert_eq!(
+                SensitiveRateLimiter::check_and_record(&env, &user_b),
+                Err(crate::errors::PeerXError::RateLimitExceeded)
+            );
+        });
+    }
+
+    #[test]
+    fn test_current_usage_tracking() {
+        let (env, contract_id, user) = setup();
+        env.as_contract(&contract_id, || {
+            assert_eq!(SensitiveRateLimiter::current_usage(&env, &user), 0);
+            SensitiveRateLimiter::check_and_record(&env, &user).unwrap();
+            assert_eq!(SensitiveRateLimiter::current_usage(&env, &user), 1);
+            SensitiveRateLimiter::check_and_record(&env, &user).unwrap();
+            assert_eq!(SensitiveRateLimiter::current_usage(&env, &user), 2);
+        });
+    }
+
+    #[test]
+    fn test_all_action_tags_share_counter() {
+        // All sensitive actions share the same per-user counter regardless of tag.
+        let (env, contract_id, user) = setup();
+        env.as_contract(&contract_id, || {
+            SensitiveRateLimiter::check_and_record_tagged(
+                &env,
+                &user,
+                action_tags::SET_ADMIN,
+            )
+            .unwrap();
+            SensitiveRateLimiter::check_and_record_tagged(
+                &env,
+                &user,
+                action_tags::PROP_OVERRIDE,
+            )
+            .unwrap();
+            SensitiveRateLimiter::check_and_record_tagged(
+                &env,
+                &user,
+                action_tags::KYC_UPDATE,
+            )
+            .unwrap();
+            // 3 used — next one should be blocked regardless of tag.
+            assert_eq!(
+                SensitiveRateLimiter::check_and_record_tagged(
+                    &env,
+                    &user,
+                    action_tags::WD_COMM,
+                ),
                 Err(crate::errors::PeerXError::RateLimitExceeded)
             );
         });

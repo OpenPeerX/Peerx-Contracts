@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/OpenPeerX/Peerx-Contracts/schemas/snapshot_state.schema.json",
+  "title": "StateSnapshot",
+  "description": "JSON projection of the `StateSnapshot` struct returned by the emergency module's forensic snapshot function (`peerx-contracts/counter/src/emergency.rs`). Soroban contracts exchange data as XDR `ScVal`, not JSON, so this schema describes the canonical JSON representation that off-chain forensic/indexing tools should produce when decoding a snapshot's XDR payload, e.g. via `stellar-xdr` or `soroban-client`. Rust tuples and `Vec<(K, V)>` maps are projected as arrays of named objects for readability; 128-bit and 64-bit integers are encoded as decimal strings because they can exceed JavaScript's safe integer range (2^53 - 1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "balances",
+    "pool_xlm",
+    "pool_usdc",
+    "total_fees",
+    "badges",
+    "tiers",
+    "paused",
+    "frozen_users",
+    "block_volume"
+  ],
+  "properties": {
+    "balances": {
+      "type": "array",
+      "description": "Snapshot of per-user, per-asset balances. Corresponds to `Vec<((Address, Symbol), i128)>`.",
+      "items": { "$ref": "#/$defs/balanceEntry" }
+    },
+    "pool_xlm": {
+      "$ref": "#/$defs/i128String",
+      "description": "Total XLM liquidity held by the pool at snapshot time."
+    },
+    "pool_usdc": {
+      "$ref": "#/$defs/i128String",
+      "description": "Total USDC liquidity held by the pool at snapshot time."
+    },
+    "total_fees": {
+      "$ref": "#/$defs/i128String",
+      "description": "Total accumulated protocol fees at snapshot time."
+    },
+    "badges": {
+      "type": "array",
+      "description": "Snapshot of per-user badge grants. Corresponds to `Vec<((Address, Symbol), bool)>`.",
+      "items": { "$ref": "#/$defs/badgeEntry" }
+    },
+    "tiers": {
+      "type": "array",
+      "description": "Snapshot of per-user tier assignments. Corresponds to `Vec<(Address, Symbol)>`.",
+      "items": { "$ref": "#/$defs/tierEntry" }
+    },
+    "paused": {
+      "type": "boolean",
+      "description": "Whether the contract's emergency pause switch was engaged at snapshot time."
+    },
+    "frozen_users": {
+      "type": "array",
+      "description": "Addresses frozen by the emergency admin at snapshot time. Corresponds to `Vec<Address>`.",
+      "items": { "$ref": "#/$defs/address" }
+    },
+    "block_volume": {
+      "type": "array",
+      "description": "Per-block traded volume recorded by the circuit breaker. Corresponds to `Vec<(u64, i128)>`.",
+      "items": { "$ref": "#/$defs/blockVolumeEntry" }
+    }
+  },
+  "$defs": {
+    "address": {
+      "type": "string",
+      "description": "Stellar/Soroban strkey-encoded address (account `G...` or contract `C...`).",
+      "pattern": "^[GC][A-Z2-7]{55}$"
+    },
+    "symbol": {
+      "type": "string",
+      "description": "Soroban `Symbol`: up to 32 characters from [A-Za-z0-9_].",
+      "pattern": "^[A-Za-z0-9_]{1,32}$"
+    },
+    "i128String": {
+      "type": "string",
+      "description": "Signed 128-bit integer encoded as a base-10 string to avoid precision loss.",
+      "pattern": "^-?(0|[1-9][0-9]*)$"
+    },
+    "u64String": {
+      "type": "string",
+      "description": "Unsigned 64-bit integer encoded as a base-10 string to avoid precision loss.",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "balanceEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "asset", "amount"],
+      "properties": {
+        "address": { "$ref": "#/$defs/address" },
+        "asset": { "$ref": "#/$defs/symbol" },
+        "amount": { "$ref": "#/$defs/i128String" }
+      }
+    },
+    "badgeEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "badge", "earned"],
+      "properties": {
+        "address": { "$ref": "#/$defs/address" },
+        "badge": { "$ref": "#/$defs/symbol" },
+        "earned": { "type": "boolean" }
+      }
+    },
+    "tierEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "tier"],
+      "properties": {
+        "address": { "$ref": "#/$defs/address" },
+        "tier": { "$ref": "#/$defs/symbol" }
+      }
+    },
+    "blockVolumeEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block", "volume"],
+      "properties": {
+        "block": { "$ref": "#/$defs/u64String" },
+        "volume": { "$ref": "#/$defs/i128String" }
+      }
+    }
+  }
+}

@@ -3,6 +3,8 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Env, IntoVal, Map, Symbol,
     TryFromVal, Val, Vec,
 };
+#[cfg(feature = "experimental")]
+use soroban_sdk::Bytes;
 
 // Bring in modules from parent directory
 mod admin;
@@ -17,6 +19,9 @@ mod kyc;
 #[cfg(test)]
 mod kyc_tests;
 mod liquidity_pool;
+mod observability;
+#[cfg(test)]
+mod observability_tests;
 mod rate_limit;
 mod state_snapshot;
 #[cfg(test)]
@@ -55,6 +60,7 @@ mod risk_management;
 pub use governance_params::{GovernanceParams, ParamKey, PendingParamUpdate};
 pub use nonce::NonceGuard;
 pub use rate_limit::SensitiveRateLimiter;
+pub use rate_limit::action_tags as sensitive_action_tags;
 
 mod portfolio {
     include!("../portfolio.rs");
@@ -157,12 +163,13 @@ pub use zkp_proof_generation::ProofGenerator;
 #[cfg(feature = "experimental")]
 pub use zkp_types::{
     AuditEventType, AuditLogEntry, BalanceProof, Commitment, PrivateTransaction, ProofScheme,
-    ProofVerificationResult, RangeProof, TransactionWitness, ZKProof,
+    ProofVerificationResult, RangeProof, Receipt, TransactionWitness, ZKProof,
 };
 #[cfg(feature = "experimental")]
 pub use zkp_verification::ProofVerifier;
 
 use portfolio::{Asset, CachedPortfolio, CachedTopTraders, LPPosition, Portfolio};
+pub use observability::LogLevel;
 pub use portfolio::{Badge, Metrics, Transaction};
 pub use rate_limit::{RateLimitStatus, RateLimiter};
 pub use tiers::UserTier;
@@ -217,6 +224,14 @@ pub fn resume_trading(env: Env, caller: Address) -> Result<bool, PeerXError> {
 pub fn set_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), PeerXError> {
     caller.require_auth();
     crate::admin::require_admin(&env, &caller)?;
+
+    // ── Sensitive-action rate limit (audit-logged) ─────────────────────────
+    SensitiveRateLimiter::check_and_record_tagged(
+        &env,
+        &caller,
+        crate::rate_limit::action_tags::SET_ADMIN,
+    )?;
+
     env.storage().persistent().set(&ADMIN_KEY, &new_admin);
     Ok(())
 }
@@ -481,13 +496,14 @@ impl CounterContract {
         // Flush batched badge events
         crate::events::Events::flush_badge_events(&env);
 
-        // Optional structured logging for successful swap
-        #[cfg(feature = "logging")]
-        {
-            use soroban_sdk::symbol_short;
-            env.events()
-                .publish((symbol_short!("swap")), (amount, out_amount));
-        }
+        // Structured logging for successful swap, gated by the admin-set
+        // log level (see observability.rs) rather than a compile-time flag.
+        observability::log(
+            &env,
+            observability::LogLevel::Debug,
+            (symbol_short!("swap"),),
+            (amount, out_amount),
+        );
 
         Ok(out_amount)
     }
@@ -515,12 +531,12 @@ impl CounterContract {
             env.storage().instance().set(&(), &portfolio);
             invalidate_query_cache(&env);
 
-            #[cfg(feature = "logging")]
-            {
-                use soroban_sdk::symbol_short;
-                env.events()
-                    .publish((symbol_short!("fail"), user.clone()), (from, to, amount));
-            }
+            observability::log(
+                &env,
+                observability::LogLevel::Warn,
+                (symbol_short!("fail"), user.clone()),
+                (from, to, amount),
+            );
             return 0;
         }
 
@@ -532,12 +548,12 @@ impl CounterContract {
         // Flush batched badge events
         crate::events::Events::flush_badge_events(&env);
 
-        #[cfg(feature = "logging")]
-        {
-            use soroban_sdk::symbol_short;
-            env.events()
-                .publish((symbol_short!("swap")), (amount, out_amount));
-        }
+        observability::log(
+            &env,
+            observability::LogLevel::Debug,
+            (symbol_short!("swap"),),
+            (amount, out_amount),
+        );
 
         out_amount
     }
@@ -649,6 +665,20 @@ impl CounterContract {
         Ok(())
     }
 
+    // ===== OBSERVABILITY =====
+
+    /// Set the minimum event log level (admin only). Durable across calls
+    /// and upgrades; overrides the compiled per-network default (Debug on
+    /// dev, Info on testnet, Warn on mainnet). See src/observability.rs.
+    pub fn set_log_level(env: Env, caller: Address, level: LogLevel) -> Result<(), PeerXError> {
+        observability::set_log_level(&env, caller, level)
+    }
+
+    /// Get the currently effective minimum event log level.
+    pub fn get_log_level(env: Env) -> LogLevel {
+        observability::get_log_level(&env)
+    }
+
     /// Get cache stats as (hits, misses, hit_ratio_bps).
     pub fn get_cache_stats(env: Env) -> (u64, u64, u32) {
         let hits: u64 = env.storage().instance().get(&CACHE_HITS_KEY).unwrap_or(0);
@@ -748,6 +778,12 @@ impl CounterContract {
     /// Returns the number of storage entries cleaned up.
     pub fn cleanup_rate_limits(env: Env, user: Address) -> u32 {
         RateLimiter::cleanup_rate_limits(&env, &user)
+    }
+
+    /// Get the number of sensitive admin actions used by `user` in the
+    /// current 10-minute window (limit = `SENSITIVE_ACTION_LIMIT`).
+    pub fn get_sensitive_rate_limit_usage(env: Env, user: Address) -> u32 {
+        SensitiveRateLimiter::current_usage(&env, &user)
     }
 
     // ===== BATCH OPERATIONS =====
@@ -1546,65 +1582,24 @@ impl CounterContract {
         referral_system::withdraw_commission(&env, user)
     }
 
-    // ── Read-Only Access ─────────────────────────────────────────────────────
+    // ── Zero-Knowledge Privacy ───────────────────────────────────────────────
 
-    /// Grant (or replace) the read-only auditor/dashboard role (admin only).
-    /// Durable. The granted address can call `invoke_read` to reach
-    /// read-only entry points without submitting a signed transaction of
-    /// its own - see `invoke_read` for why that's safe.
-    pub fn set_read_only_role(env: Env, caller: Address, role: Address) -> Result<(), PeerXError> {
-        caller.require_auth();
-        crate::admin::require_admin(&env, &caller)?;
-        env.storage().persistent().set(&READ_ONLY_ROLE_KEY, &role);
-        crate::events::Events::read_only_role_set(&env, caller, role, env.ledger().timestamp());
-        Ok(())
-    }
-
-    /// Dispatch a read-only call by function name for the configured
-    /// read-only role, without that caller needing to sign/authenticate.
+    /// Fetch the audit-friendly receipt for a private transaction, by its
+    /// transaction hash. Public: off-chain consumers (indexers, compliance
+    /// tooling) use this to verify a private transaction occurred without
+    /// the contract exposing the underlying private witness values.
     ///
-    /// `fn_name` must be one of a fixed, curated allowlist of genuinely
-    /// read-only entry points - every mutating entry point (swap, mint,
-    /// add_liquidity, ...) is absent from that allowlist by construction,
-    /// so no argument or role can ever reach state-mutating logic through
-    /// this path. Unrecognized names return `UnsupportedReadOnlyFunction`.
-    pub fn invoke_read(env: Env, role: Address, fn_name: Symbol, args: Vec<Val>) -> Result<Val, PeerXError> {
-        require_read_only_role(&env, &role)?;
-
-        if fn_name == Symbol::new(&env, "get_metrics") {
-            return Ok(Self::get_metrics(env.clone()).into_val(&env));
-        }
-
-        if fn_name == Symbol::new(&env, "balance_of") {
-            let token_val = args.get(0).ok_or(PeerXError::InvalidReadArgs)?;
-            let user_val = args.get(1).ok_or(PeerXError::InvalidReadArgs)?;
-            let token =
-                Symbol::try_from_val(&env, &token_val).map_err(|_| PeerXError::InvalidReadArgs)?;
-            let user =
-                Address::try_from_val(&env, &user_val).map_err(|_| PeerXError::InvalidReadArgs)?;
-            return Ok(Self::balance_of(env.clone(), token, user).into_val(&env));
-        }
-
-        if fn_name == Symbol::new(&env, "get_portfolio") {
-            let user_val = args.get(0).ok_or(PeerXError::InvalidReadArgs)?;
-            let user =
-                Address::try_from_val(&env, &user_val).map_err(|_| PeerXError::InvalidReadArgs)?;
-            return Ok(Self::get_portfolio(env.clone(), user).into_val(&env));
-        }
-
-        if fn_name == Symbol::new(&env, "get_user_tier") {
-            let user_val = args.get(0).ok_or(PeerXError::InvalidReadArgs)?;
-            let user =
-                Address::try_from_val(&env, &user_val).map_err(|_| PeerXError::InvalidReadArgs)?;
-            return Ok(Self::get_user_tier(env.clone(), user).into_val(&env));
-        }
-
-        Err(PeerXError::UnsupportedReadOnlyFunction)
+    /// Returns `ZKPError::ProofNotFound` for an empty or unrecognized hash.
+    #[cfg(feature = "experimental")]
+    pub fn private_tx_receipt(env: Env, tx_hash: Bytes) -> Result<Receipt, ZKPError> {
+        zkp_verification::receipts::get_receipt(&env, tx_hash)
     }
 }
 
 #[cfg(all(test, feature = "experimental"))]
 mod migration_tests;
+#[cfg(all(test, feature = "experimental"))]
+mod zkp_receipt_tests;
 mod risk_management_tests;
 mod governance_tests;
 #[cfg(test)]

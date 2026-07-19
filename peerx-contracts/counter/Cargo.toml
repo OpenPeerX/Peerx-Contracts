@@ -25,3 +25,9 @@ proptest = "1.4"
 # Off by default to avoid overhead in production.
 logging = []
 experimental = []
+
+# Selects the compiled default for observability::LogLevel (overridable at
+# runtime by the admin via set_log_level). Mutually exclusive; omitting both
+# yields the dev default (Debug). See src/observability.rs.
+mainnet = []
+testnet = []
