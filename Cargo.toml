@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "peerx-contracts/counter",
   "peerx-contracts/soroban-ping",
+  "peerx-cli",
 ]
 
 [workspace.dependencies]
