@@ -4,7 +4,7 @@
 > PeerX gives users a fully simulated environment to learn market mechanics — AMM swaps, liquidity provision, limit & stop-loss orders, staking, referrals, and portfolio analytics — without exposing real capital.
 
 [![Soroban](https://img.shields.io/badge/Soroban-21.7.1-7C39C9?logo=stellar&logoColor=white)](https://soroban.stellar.org)
-[![Rust](https://img.shields.io/badge/Rust-1.74%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.79.0-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
 [![Audit](https://img.shields.io/badge/audit-pre--audit--hardening-yellow)](#security-posture)
