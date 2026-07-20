@@ -1,6 +1,7 @@
 #![cfg_attr(all(not(test), target_family = "wasm"), no_std)]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, Env, IntoVal, Map, Symbol,
+    TryFromVal, Val, Vec,
 };
 #[cfg(feature = "experimental")]
 use soroban_sdk::Bytes;
@@ -175,7 +176,27 @@ pub use tiers::UserTier;
 use trading::perform_swap;
 
 use crate::errors::{ContractError, PeerXError};
-use crate::storage::{ADMIN_KEY, PAUSED_KEY};
+use crate::storage::{ADMIN_KEY, PAUSED_KEY, READ_ONLY_ROLE_KEY};
+
+/// Checks `role` against the durably-stored read-only auditor/dashboard
+/// role set via `CounterContract::set_read_only_role`. Deliberately does
+/// NOT call `role.require_auth()` - the whole point of `invoke_read` is
+/// letting auditors/dashboards reach read-only entry points without
+/// submitting a signed transaction of their own; the admin-curated
+/// allowlist plus this identity check are the only gate.
+fn require_read_only_role(env: &Env, role: &Address) -> Result<(), PeerXError> {
+    let stored: Address = env
+        .storage()
+        .persistent()
+        .get(&READ_ONLY_ROLE_KEY)
+        .ok_or(PeerXError::NotReadOnlyRole)?;
+
+    if stored == *role {
+        Ok(())
+    } else {
+        Err(PeerXError::NotReadOnlyRole)
+    }
+}
 
 pub(crate) fn require_verified_user(env: &Env, user: &Address) -> Result<(), ContractError> {
     kyc::KYCSystem::require_verified(env, user)
@@ -1581,3 +1602,5 @@ mod migration_tests;
 mod zkp_receipt_tests;
 mod risk_management_tests;
 mod governance_tests;
+#[cfg(test)]
+mod read_only_role_tests;
