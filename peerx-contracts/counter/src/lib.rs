@@ -1575,6 +1575,8 @@ impl CounterContract {
     }
 }
 
+#[cfg(all(test, feature = "test-determinism"))]
+mod test_harness;
 #[cfg(all(test, feature = "experimental"))]
 mod migration_tests;
 #[cfg(all(test, feature = "experimental"))]
