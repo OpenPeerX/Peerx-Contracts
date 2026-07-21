@@ -87,6 +87,8 @@ mod network_congestion;
 #[cfg(all(test, feature = "experimental"))]
 mod dynamic_fee_adjustment_tests;
 mod risk_management_tests;
+#[cfg(test)]
+mod fuzz;
 
 // Staking Bonus System
 mod staking_bonus;
