@@ -482,7 +482,7 @@ We welcome pull requests for new educational scenarios, additional test coverage
 
 ## License
 
-**MIT.** *(No `LICENSE` file is currently committed — add one before publishing. Until then, all rights reserved by default.)*
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
 ---
 
