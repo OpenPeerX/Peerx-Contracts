@@ -4,6 +4,7 @@ members = [
   "peerx-contracts/counter",
   "peerx-contracts/soroban-ping",
   "peerx-cli",
+  "bin/peerx-metrics-exporter",
 ]
 
 [workspace.dependencies]
