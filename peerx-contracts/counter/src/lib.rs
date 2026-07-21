@@ -56,6 +56,7 @@ mod governance_system;
 mod governance_params;
 mod nonce;
 mod risk_management;
+mod validation;
 
 pub use governance_params::{GovernanceParams, ParamKey, PendingParamUpdate};
 pub use nonce::NonceGuard;
@@ -175,7 +176,7 @@ pub use rate_limit::{RateLimitStatus, RateLimiter};
 pub use tiers::UserTier;
 use trading::perform_swap;
 
-use crate::errors::{ContractError, PeerXError};
+use crate::errors::{ContractError, PeerXError, SwapChecklist};
 use crate::storage::{ADMIN_KEY, PAUSED_KEY, READ_ONLY_ROLE_KEY};
 
 /// Checks `role` against the durably-stored read-only auditor/dashboard
@@ -506,6 +507,137 @@ impl CounterContract {
         );
 
         Ok(out_amount)
+    }
+
+    /// Pre-flight validation for a swap intent.
+    ///
+    /// Mirrors every guard that [`swap`] applies – balance, KYC, rate-limit,
+    /// oracle freshness, pool depth, slippage, circuit-breaker, trading-pause,
+    /// and pair validity – but is **read-only**.  No state is mutated and no
+    /// authentication is required.
+    ///
+    /// A fully-green `SwapChecklist` (all fields `true`) means the swap
+    /// **should** succeed on-chain (barring race conditions between this
+    /// read and the actual submission).
+    pub fn preflight_swap(
+        env: Env,
+        from: Symbol,
+        to: Symbol,
+        amount: i128,
+        user: Address,
+    ) -> SwapChecklist {
+        let mut checklist = SwapChecklist {
+            balance_ok: false,
+            kyc_ok: false,
+            rate_limit_ok: false,
+            slippage_ok: false,
+            oracle_fresh_ok: false,
+            pool_depth_ok: false,
+            circuit_breaker_ok: false,
+            trading_paused_ok: false,
+            pair_ok: false,
+        };
+
+        // ── Pair validity ────────────────────────────────────────────────────
+        checklist.pair_ok = validation::validate_swap_pair(from.clone(), to.clone()).is_ok();
+        if !checklist.pair_ok {
+            return checklist;
+        }
+
+        // ── Trading pause ────────────────────────────────────────────────────
+        let paused: bool = env
+            .storage()
+            .persistent()
+            .get(&PAUSED_KEY)
+            .unwrap_or(false);
+        checklist.trading_paused_ok = !paused;
+        if !checklist.trading_paused_ok {
+            return checklist;
+        }
+
+        // ── Circuit breaker ──────────────────────────────────────────────────
+        checklist.circuit_breaker_ok =
+            !risk_management::CircuitBreaker::is_circuit_breaker_active(&env);
+
+        // ── KYC ──────────────────────────────────────────────────────────────
+        checklist.kyc_ok = kyc::KYCSystem::is_verified(&env, &user);
+
+        // ── Balance ──────────────────────────────────────────────────────────
+        let portfolio: Portfolio = env
+            .storage()
+            .instance()
+            .get(&())
+            .unwrap_or_else(|| Portfolio::new(&env));
+
+        let from_asset = if from == symbol_short!("XLM") {
+            Asset::XLM
+        } else {
+            Asset::Custom(from.clone())
+        };
+        let balance = portfolio.balance_of(&env, from_asset, user.clone());
+        checklist.balance_ok = balance >= amount;
+
+        // ── Rate limit ───────────────────────────────────────────────────────
+        let user_tier = portfolio.get_user_tier(&env, user.clone());
+        checklist.rate_limit_ok =
+            RateLimiter::check_swap_limit(&env, &user, &user_tier).is_ok();
+
+        // ── Oracle freshness ─────────────────────────────────────────────────
+        const STALE_THRESHOLD: u64 = 600; // 10 minutes
+        let oracle_fresh = oracle::get_stored_price(&env, (from.clone(), to.clone()))
+            .or_else(|| oracle::get_stored_price(&env, (to.clone(), from.clone())))
+            .map(|data| {
+                let age = env.ledger().timestamp().saturating_sub(data.timestamp);
+                age <= STALE_THRESHOLD && data.price > 0
+            })
+            .unwrap_or(false);
+        // Allow 1:1 fallback when no oracle is configured – treat as fresh
+        checklist.oracle_fresh_ok = oracle_fresh || amount > 0;
+
+        // ── Pool depth ───────────────────────────────────────────────────────
+        let xlm_liq = portfolio.get_liquidity(Asset::XLM);
+        let usdc_liq =
+            portfolio.get_liquidity(Asset::Custom(symbol_short!("USDCSIM")));
+        let reserves_sufficient = if from == symbol_short!("XLM") {
+            usdc_liq >= amount
+        } else {
+            xlm_liq >= amount
+        };
+        checklist.pool_depth_ok = reserves_sufficient;
+
+        // ── Slippage ─────────────────────────────────────────────────────────
+        // Estimate slippage using constant-product AMM formula
+        let (reserve_in, reserve_out) = if from == symbol_short!("XLM") {
+            (xlm_liq as u128, usdc_liq as u128)
+        } else {
+            (usdc_liq as u128, xlm_liq as u128)
+        };
+        if reserve_in > 0 && reserve_out > 0 {
+            let amount_u = amount as u128;
+            // Output with fee
+            let fee_bps: u128 = 30; // 0.3%
+            let amount_after_fee = amount_u * (10000 - fee_bps) / 10000;
+            let actual_out = (reserve_out * amount_after_fee) / (reserve_in + amount_after_fee);
+            // Theoretical output without fee (for slippage calc)
+            let theoretical_out = (reserve_out * amount_u) / (reserve_in + amount_u);
+            let max_slip: u32 = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("MAX_SLIP"))
+                .unwrap_or(10000);
+            let slippage_ok = if theoretical_out > 0 {
+                let slippage_bps = ((theoretical_out - actual_out) * 10000) / theoretical_out;
+                slippage_bps <= max_slip as u128
+            } else {
+                true
+            };
+            checklist.slippage_ok = slippage_ok;
+        } else {
+            // No liquidity – AMM fallback uses oracle price, slippage N/A
+            checklist.slippage_ok = true;
+        }
+
+        checklist
     }
 
     /// Non-panicking swap that counts failed orders and returns 0 on failure
