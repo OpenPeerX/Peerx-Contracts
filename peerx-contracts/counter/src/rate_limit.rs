@@ -126,9 +126,9 @@ impl TimeWindow {
         }
     }
 
-    /// Get hourly window using cached boundary if available
-    pub fn hourly_cached(env: &Env, current_timestamp: u64) -> Self {
-        let cache_key = symbol_short!("hourly_c");
+    /// Get hourly window using per-user cached boundary for O(1) cooldown reads.
+    pub fn hourly_cached(env: &Env, user: &Address, current_timestamp: u64) -> Self {
+        let cache_key = (user.clone(), symbol_short!("hourly_c"));
 
         // Try to get cached boundary
         let cached: Option<CachedWindowBoundary> = env.storage().persistent().get(&cache_key);
@@ -149,9 +149,9 @@ impl TimeWindow {
         window
     }
 
-    /// Get daily window using cached boundary if available
-    pub fn daily_cached(env: &Env, current_timestamp: u64) -> Self {
-        let cache_key = symbol_short!("daily_c");
+    /// Get daily window using per-user cached boundary for O(1) cooldown reads.
+    pub fn daily_cached(env: &Env, user: &Address, current_timestamp: u64) -> Self {
+        let cache_key = (user.clone(), symbol_short!("daily_c"));
 
         // Try to get cached boundary
         let cached: Option<CachedWindowBoundary> = env.storage().persistent().get(&cache_key);
@@ -202,7 +202,7 @@ impl RateLimiter {
         }
 
         let timestamp = env.ledger().timestamp();
-        let window = TimeWindow::hourly_cached(env, timestamp);
+        let window = TimeWindow::hourly_cached(env, user, timestamp);
         let count_key = (user.clone(), symbol_short!("swap"), window.window_start);
 
         // Get current count
@@ -221,7 +221,7 @@ impl RateLimiter {
 
     /// Record a swap operation in storage
     pub fn record_swap(env: &Env, user: &Address, timestamp: u64) {
-        let window = TimeWindow::hourly_cached(env, timestamp);
+        let window = TimeWindow::hourly_cached(env, user, timestamp);
         let count_key = (user.clone(), symbol_short!("swap"), window.window_start);
 
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -245,7 +245,7 @@ impl RateLimiter {
         }
 
         let timestamp = env.ledger().timestamp();
-        let window = TimeWindow::daily_cached(env, timestamp);
+        let window = TimeWindow::daily_cached(env, user, timestamp);
         let count_key = (user.clone(), symbol_short!("lp_op"), window.window_start);
 
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -263,7 +263,7 @@ impl RateLimiter {
 
     /// Record an LP operation in storage
     pub fn record_lp_op(env: &Env, user: &Address, timestamp: u64) {
-        let window = TimeWindow::daily_cached(env, timestamp);
+        let window = TimeWindow::daily_cached(env, user, timestamp);
         let count_key = (user.clone(), symbol_short!("lp_op"), window.window_start);
 
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -277,7 +277,7 @@ impl RateLimiter {
     pub fn get_swap_status(env: &Env, user: &Address, tier: &UserTier) -> RateLimitStatus {
         let config = RateLimitConfig::for_tier(tier);
         let timestamp = env.ledger().timestamp();
-        let window = TimeWindow::hourly_cached(env, timestamp);
+        let window = TimeWindow::hourly_cached(env, user, timestamp);
         let count_key = (user.clone(), symbol_short!("swap"), window.window_start);
 
         let used: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -293,7 +293,7 @@ impl RateLimiter {
     pub fn get_lp_status(env: &Env, user: &Address, tier: &UserTier) -> RateLimitStatus {
         let config = RateLimitConfig::for_tier(tier);
         let timestamp = env.ledger().timestamp();
-        let window = TimeWindow::daily_cached(env, timestamp);
+        let window = TimeWindow::daily_cached(env, user, timestamp);
         let count_key = (user.clone(), symbol_short!("lp_op"), window.window_start);
 
         let used: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
