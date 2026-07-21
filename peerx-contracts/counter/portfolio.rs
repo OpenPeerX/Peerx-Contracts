@@ -881,20 +881,15 @@ impl Portfolio {
     }
 
     /// Get the top N traders by PnL (leaderboard)
-    /// Capped at top 100 for safety
     /// Returns Vec<(Address, i128)>: list of (user, pnl) pairs sorted by PnL descending
-    /// Time complexity: O(1) - precomputed top 100
+    /// Time complexity: O(limit) — iterates only up to the requested count.
     pub fn get_top_traders(&self, env: &Env, limit: u32) -> Vec<(Address, i128)> {
-        let max_limit: u32 = 100;
-        let actual_limit = if limit > max_limit { max_limit } else { limit };
-
         let mut result = Vec::new(env);
-        let len = self.top_traders.len() as usize;
-        let limit_usize: usize = actual_limit as usize;
-        let cap = if len < limit_usize { len } else { limit_usize };
+        let len = self.top_traders.len();
+        let cap = if (len as u32) < limit { len } else { limit as usize };
 
-        for i in 0..cap {
-            if let Some(trader) = self.top_traders.get(i as u32) {
+        for i in 0..cap as u32 {
+            if let Some(trader) = self.top_traders.get(i) {
                 result.push_back(trader);
             }
         }
