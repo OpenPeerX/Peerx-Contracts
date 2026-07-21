@@ -319,17 +319,12 @@ fn apply_trader_limit(
     traders: Vec<(Address, i128)>,
     limit: u32,
 ) -> Vec<(Address, i128)> {
-    let max_limit = if limit > 100 { 100 } else { limit };
     let mut result = Vec::new(env);
-    let len = traders.len() as usize;
-    let cap = if len < max_limit as usize {
-        len
-    } else {
-        max_limit as usize
-    };
+    let len = traders.len() as u32;
+    let cap = if len < limit { len } else { limit };
 
     for i in 0..cap {
-        if let Some(entry) = traders.get(i as u32) {
+        if let Some(entry) = traders.get(i) {
             result.push_back(entry);
         }
     }
@@ -775,7 +770,8 @@ impl CounterContract {
             .get(&())
             .unwrap_or_else(|| Portfolio::new(&env));
 
-        let traders = portfolio.get_top_traders(&env, 100);
+        let candidate_limit = if limit > 100 { limit } else { limit.max(100) };
+        let traders = portfolio.get_top_traders(&env, candidate_limit);
         env.storage().instance().set(
             &TOP_TRADERS_CACHE_KEY,
             &CachedTopTraders {
