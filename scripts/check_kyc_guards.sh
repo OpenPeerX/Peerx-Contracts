@@ -66,4 +66,27 @@ if [[ "$(grep -c 'authorize_batch_access(env, &operations)' "$BATCH_FILE")" -lt 
   exit 1
 fi
 
+# `MintToken` is a privileged, admin-only batch operation (issue #39). The
+# shared authorization helper must gate any batch that mints behind the
+# contract admin, so a MintToken op can no longer bypass KYC/admin checks.
+if ! grep -q 'fn require_batch_admin' "$BATCH_FILE"; then
+  echo "Batch guard is missing the admin gate for privileged operations (MintToken)" >&2
+  exit 1
+fi
+
+if ! grep -q 'require_batch_admin(env)' "$BATCH_FILE"; then
+  echo "Batch authorization helper does not invoke the MintToken admin gate" >&2
+  exit 1
+fi
+
+if ! grep -q 'admin.require_auth();' "$BATCH_FILE"; then
+  echo "Batch admin gate is missing admin authentication enforcement" >&2
+  exit 1
+fi
+
+if ! grep -q 'crate::admin::require_admin(env, &admin)' "$BATCH_FILE"; then
+  echo "Batch admin gate is missing the shared require_admin check" >&2
+  exit 1
+fi
+
 echo "Verified KYC guard coverage for sensitive contract entry points."

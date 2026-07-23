@@ -137,6 +137,8 @@ fn is_valid_token(token: &Symbol) -> bool {
 }
 
 fn authorize_batch_access(env: &Env, operations: &Vec<BatchOperation>) -> Result<(), Symbol> {
+    let mut requires_admin = false;
+
     for i in 0..operations.len() {
         if let Some(operation) = operations.get(i) {
             match operation {
@@ -147,11 +149,43 @@ fn authorize_batch_access(env: &Env, operations: &Vec<BatchOperation>) -> Result
                     crate::require_verified_user(env, &user)
                         .map_err(|_| Symbol::new(env, "kyc_req"))?;
                 }
-                BatchOperation::MintToken(_, _, _) => {}
+                // `MintToken` is privileged. Defer the admin gate until after the
+                // loop so it is enforced exactly once for the whole batch, no
+                // matter how many mint operations it contains.
+                BatchOperation::MintToken(_, _, _) => {
+                    requires_admin = true;
+                }
             }
         }
     }
 
+    // `MintToken` is an admin-only operation, even inside a batch. If any
+    // operation mints, the entire batch must be authorized by the configured
+    // contract admin. This closes the bypass (issue #39) where a batch whose
+    // first/only operation was a `MintToken` set `caller = None` and skipped
+    // every KYC and admin guard, letting anyone mint tokens.
+    if requires_admin {
+        require_batch_admin(env)?;
+    }
+
+    Ok(())
+}
+
+/// Requires that the current batch invocation is authorized by the configured
+/// contract admin. Used to gate privileged batch operations such as
+/// `MintToken`.
+///
+/// Returns `admin_req` when no admin is configured (fail closed) or when the
+/// loaded admin does not pass the shared admin check. Callers who are not the
+/// admin cannot satisfy `admin.require_auth()` and therefore revert.
+fn require_batch_admin(env: &Env) -> Result<(), Symbol> {
+    let admin = env
+        .storage()
+        .persistent()
+        .get::<_, Address>(&crate::storage::ADMIN_KEY)
+        .ok_or_else(|| Symbol::new(env, "admin_req"))?;
+    admin.require_auth();
+    crate::admin::require_admin(env, &admin).map_err(|_| Symbol::new(env, "admin_req"))?;
     Ok(())
 }
 
