@@ -1,3 +1,10 @@
+#![deny(missing_docs)]
+//! Market Data Streaming
+//! 
+//! A high-performance real-time market data streaming system for Soroban.
+//! 
+//! Provides WebSocket feeds, order book management, data compression,
+//! and historical data access.
 pub mod websocket;
 pub mod orderbook;
 pub mod compression;
