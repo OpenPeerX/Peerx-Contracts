@@ -1,4 +1,21 @@
-#![cfg_attr(all(not(test), target_family = "wasm"), no_std)]
+#![cfg_attr(all(not(test), target_family="wasm"), no_std)]
+#![deny(missing_docs)]
+//! PeerX Contracts
+//! 
+//! Production-grade Soroban smart contracts for a risk-free, on-chain trading classroom.
+//! 
+//! This contract implements a full simulated decentralized exchange (DEX) with:
+//! - Constant-product AMM swaps
+//! - Multi-hop routing
+//! - Liquidity pools with LP tokens
+//! - Limit and stop-loss orders
+//! - KYC system
+//! - Rate limiting
+//! - Circuit breakers
+//! - Governance parameters
+//! - Referral system
+//! - Staking bonuses
+//! - And much more!
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Env, IntoVal, Map, Symbol,
     TryFromVal, Val, Vec,
@@ -356,6 +373,19 @@ impl CounterContract {
         migration::migrate_from_v1_to_v2(&env)
     }
 
+    /// Mint simulated tokens to a user.
+    /// 
+    /// This is an admin-only function that creates new simulated tokens
+    /// and credits them to the specified user's balance.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `token` - The token symbol to mint (XLM or a custom token)
+    /// * `to` - The address to mint tokens to
+    /// * `amount` - The amount of tokens to mint
+    /// 
+    /// # Panics
+    /// This function will panic if called by a non-admin user
     pub fn mint(env: Env, token: Symbol, to: Address, amount: i128) {
         let mut portfolio: Portfolio = env
             .storage()
@@ -375,6 +405,18 @@ impl CounterContract {
         invalidate_query_cache(&env);
     }
 
+    /// Get the token balance of a user.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `token` - The token symbol to check balance for
+    /// * `user` - The user address to check
+    /// 
+    /// # Returns
+    /// The token balance of the user
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn balance_of(env: Env, token: Symbol, user: Address) -> i128 {
         let portfolio: Portfolio = env
             .storage()
@@ -637,7 +679,24 @@ impl CounterContract {
         checklist
     }
 
-    /// Non-panicking swap that counts failed orders and returns 0 on failure
+    /// Non-panicking swap that counts failed orders and returns 0 on failure.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `from` - The token to swap from
+    /// * `to` - The token to swap to
+    /// * `amount` - The amount to swap
+    /// * `user` - The user performing the swap
+    /// 
+    /// # Returns
+    /// The amount received from the swap, or 0 if the swap failed
+    /// 
+    /// # Events
+    /// Emits a "fail" event if the swap fails
+    /// Emits a "swap" event if the swap succeeds
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn safe_swap(env: Env, from: Symbol, to: Symbol, amount: i128, user: Address) -> i128 {
         if require_authenticated_verified_user(&env, &user).is_err() {
             return 0;
@@ -687,7 +746,14 @@ impl CounterContract {
         out_amount
     }
 
-    /// Record a swap execution for a user
+    /// Record a swap execution for a user.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user who performed the trade
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn record_trade(env: Env, user: Address) {
         let mut portfolio: Portfolio = env
             .storage()
@@ -701,7 +767,19 @@ impl CounterContract {
         invalidate_query_cache(&env);
     }
 
-    /// Get portfolio stats for a user (trade count, pnl)
+    /// Get portfolio stats for a user (trade count, pnl).
+    /// 
+    /// Uses caching with a configurable TTL.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to get portfolio stats for
+    /// 
+    /// # Returns
+    /// A tuple of (trade count, pnl)
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_portfolio(env: Env, user: Address) -> (u32, i128) {
         let now = env.ledger().timestamp();
         let ttl = get_cache_ttl(&env);
@@ -748,6 +826,16 @@ impl CounterContract {
     }
 
     /// Get top traders with instance-storage caching.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `limit` - Maximum number of traders to return
+    /// 
+    /// # Returns
+    /// A vector of (address, pnl), sorted by pnl descending
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_top_traders(env: Env, limit: u32) -> Vec<(Address, i128)> {
         let now = env.ledger().timestamp();
         let ttl = get_cache_ttl(&env);
@@ -784,6 +872,17 @@ impl CounterContract {
     }
 
     /// Update cache TTL in seconds (admin only).
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `caller` - The admin caller address
+    /// * `ttl_seconds` - New cache TTL in seconds
+    /// 
+    /// # Errors
+    /// Returns `PeerXError::NotAdmin` if caller is not admin
+    /// 
+    /// # Panics
+    /// Panics if caller authentication fails
     pub fn set_cache_ttl(
         env: Env,
         caller: Address,
@@ -800,16 +899,45 @@ impl CounterContract {
     /// Set the minimum event log level (admin only). Durable across calls
     /// and upgrades; overrides the compiled per-network default (Debug on
     /// dev, Info on testnet, Warn on mainnet). See src/observability.rs.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `caller` - The admin caller address
+    /// * `level` - The new minimum log level
+    /// 
+    /// # Errors
+    /// Returns `PeerXError::NotAdmin` if caller is not admin
+    /// 
+    /// # Panics
+    /// Panics if caller authentication fails
     pub fn set_log_level(env: Env, caller: Address, level: LogLevel) -> Result<(), PeerXError> {
         observability::set_log_level(&env, caller, level)
     }
 
     /// Get the currently effective minimum event log level.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// 
+    /// # Returns
+    /// The current minimum log level
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_log_level(env: Env) -> LogLevel {
         observability::get_log_level(&env)
     }
 
     /// Get cache stats as (hits, misses, hit_ratio_bps).
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// 
+    /// # Returns
+    /// A tuple of (hits, misses, hit_ratio_bps)
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_cache_stats(env: Env) -> (u64, u64, u32) {
         let hits: u64 = env.storage().instance().get(&CACHE_HITS_KEY).unwrap_or(0);
         let misses: u64 = env.storage().instance().get(&CACHE_MISSES_KEY).unwrap_or(0);
@@ -817,6 +945,16 @@ impl CounterContract {
     }
 
     /// Clear all query caches (admin only).
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `caller` - The admin caller address
+    /// 
+    /// # Errors
+    /// Returns `PeerXError::NotAdmin` if caller is not admin
+    /// 
+    /// # Panics
+    /// Panics if caller authentication fails
     pub fn clear_cache(env: Env, caller: Address) -> Result<(), PeerXError> {
         caller.require_auth();
         crate::admin::require_admin(&env, &caller)?;
@@ -824,7 +962,16 @@ impl CounterContract {
         Ok(())
     }
 
-    /// Get aggregate metrics
+    /// Get aggregate metrics.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// 
+    /// # Returns
+    /// Aggregate metrics for the contract
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_metrics(env: Env) -> Metrics {
         let portfolio: Portfolio = env
             .storage()
@@ -835,7 +982,18 @@ impl CounterContract {
         portfolio.get_metrics()
     }
 
-    /// Check if a user has earned a specific badge
+    /// Check if a user has earned a specific badge.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to check
+    /// * `badge` - The badge to check for
+    /// 
+    /// # Returns
+    /// True if the user has the badge, false otherwise
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn has_badge(env: Env, user: Address, badge: Badge) -> bool {
         let portfolio: Portfolio = env
             .storage()
@@ -846,7 +1004,17 @@ impl CounterContract {
         portfolio.has_badge(&env, user, badge)
     }
 
-    /// Get all badges earned by a user
+    /// Get all badges earned by a user.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to get badges for
+    /// 
+    /// # Returns
+    /// A vector of badges earned by the user
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_user_badges(env: Env, user: Address) -> Vec<Badge> {
         let portfolio: Portfolio = env
             .storage()
@@ -857,6 +1025,18 @@ impl CounterContract {
         portfolio.get_user_badges(&env, user)
     }
 
+    /// Get recent transactions for a user.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to get transactions for
+    /// * `limit` - Maximum number of transactions to return
+    /// 
+    /// # Returns
+    /// A vector of recent transactions for the user
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_user_transactions(env: Env, user: Address, limit: u32) -> Vec<Transaction> {
         let portfolio: Portfolio = env
             .storage()
@@ -867,7 +1047,17 @@ impl CounterContract {
         portfolio.get_user_transactions(&env, user, limit)
     }
 
-    /// Get the current tier for a user
+    /// Get the current tier for a user.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to get the tier for
+    /// 
+    /// # Returns
+    /// The user's current tier
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_user_tier(env: Env, user: Address) -> UserTier {
         let portfolio: Portfolio = env
             .storage()
@@ -880,7 +1070,17 @@ impl CounterContract {
 
     // ===== RATE LIMITING =====
 
-    /// Get rate limit status for swap operations
+    /// Get rate limit status for swap operations.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to check rate limits for
+    /// 
+    /// # Returns
+    /// The rate limit status for swap operations
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_swap_rate_limit(env: Env, user: Address) -> RateLimitStatus {
         let portfolio: Portfolio = env
             .storage()
@@ -892,7 +1092,17 @@ impl CounterContract {
         RateLimiter::get_swap_status(&env, &user, &user_tier)
     }
 
-    /// Get rate limit status for LP operations
+    /// Get rate limit status for LP operations.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to check rate limits for
+    /// 
+    /// # Returns
+    /// The rate limit status for LP operations
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_lp_rate_limit(env: Env, user: Address) -> RateLimitStatus {
         let portfolio: Portfolio = env
             .storage()
@@ -906,12 +1116,32 @@ impl CounterContract {
 
     /// Remove expired rate limit counters for a user.
     /// Returns the number of storage entries cleaned up.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to clean up rate limits for
+    /// 
+    /// # Returns
+    /// The number of storage entries cleaned up
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn cleanup_rate_limits(env: Env, user: Address) -> u32 {
         RateLimiter::cleanup_rate_limits(&env, &user)
     }
 
     /// Get the number of sensitive admin actions used by `user` in the
     /// current 10-minute window (limit = `SENSITIVE_ACTION_LIMIT`).
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to check sensitive rate limit usage for
+    /// 
+    /// # Returns
+    /// The number of sensitive actions used in the current window
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_sensitive_rate_limit_usage(env: Env, user: Address) -> u32 {
         SensitiveRateLimiter::current_usage(&env, &user)
     }
