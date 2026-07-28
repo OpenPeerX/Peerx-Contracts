@@ -84,6 +84,18 @@ pub enum PeerXError {
     NoClaimableBonuses = 604,
     DistributionTooEarly = 605,
 
+    // ── Treasury ─────────────────────────────────────────────────────────────
+    /// Deposit amount must be positive.
+    TreasuryInvalidAmount = 610,
+    /// Withdraw amount exceeds current treasury balance.
+    TreasuryInsufficientFunds = 611,
+    /// The governance timelock for this withdrawal has not elapsed yet.
+    TreasuryTimelockNotElapsed = 612,
+    /// A withdrawal request for this ID was not found.
+    TreasuryWithdrawNotFound = 613,
+    /// The withdrawal request has already been executed.
+    TreasuryWithdrawAlreadyExecuted = 614,
+
     // ── Emergency / circuit-breaker ─────────────────────────────────────────
     NotEmergencyAdmin = 700,
 

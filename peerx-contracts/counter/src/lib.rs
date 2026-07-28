@@ -110,6 +110,10 @@ mod fuzz;
 // Staking Bonus System
 mod staking_bonus;
 
+// Treasury
+mod treasury;
+pub use treasury::{TreasuryManager, TreasuryKey, WithdrawRequest};
+
 // Re-export fee adjustment types
 #[cfg(feature = "experimental")]
 pub use dynamic_fee_adjustment::{
@@ -1827,6 +1831,65 @@ impl CounterContract {
     /// Execute periodic bonus distribution (admin only typically)
     pub fn execute_staking_distribution(env: Env) -> Result<DistributionRecord, ContractError> {
         StakingBonusManager::execute_distribution(&env)
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Treasury
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// Credit `amount` to the treasury from `source`.
+    ///
+    /// This entry point is intentionally public so governance or admin tools
+    /// can make manual top-ups.  Penalty credits from early-unstake happen
+    /// automatically inside `staking_bonus::unstake_early`.
+    ///
+    /// # Errors
+    /// Returns [`PeerXError::TreasuryInvalidAmount`] when `amount <= 0`.
+    pub fn treasury_deposit(env: Env, amount: i128, source: Symbol) -> Result<(), ContractError> {
+        TreasuryManager::deposit(&env, amount, source)
+    }
+
+    /// Return the current treasury balance (read-only, no auth required).
+    pub fn treasury_balance(env: Env) -> i128 {
+        TreasuryManager::balance(&env)
+    }
+
+    /// Governance-gated two-phase withdrawal.
+    ///
+    /// * Phase 1 — `request`:  creates a pending request locked by the
+    ///   configured timelock (default 48 h).  Returns the request ID.
+    /// * Phase 2 — `execute`:  after the timelock, finalise the request.
+    ///   Returns the executed [`WithdrawRequest`].
+    ///
+    /// Both phases require admin auth.
+    ///
+    /// # Arguments
+    /// * `phase`      – Either `symbol_short!("request")` or
+    ///                  `symbol_short!("execute")`.
+    /// * `amount`     – Amount for the `request` phase (ignored for `execute`).
+    /// * `destination`– Destination address for the `request` phase (ignored
+    ///                  for `execute`).
+    /// * `request_id` – For the `execute` phase: ID returned by the `request`
+    ///                  phase.  Use `0` for the `request` phase.
+    pub fn treasury_withdraw(
+        env: Env,
+        admin: Address,
+        phase: Symbol,
+        amount: i128,
+        destination: Address,
+        request_id: u64,
+    ) -> Result<u64, ContractError> {
+        admin.require_auth();
+        crate::admin::require_admin(&env, &admin)?;
+
+        if phase == symbol_short!("request") {
+            let id = TreasuryManager::request_withdraw(&env, amount, destination)?;
+            Ok(id)
+        } else {
+            // execute phase — returns the request id on success
+            TreasuryManager::execute_withdraw(&env, request_id)?;
+            Ok(request_id)
+        }
     }
 
     // ────────────────────────────────────────────────────────────────────────
