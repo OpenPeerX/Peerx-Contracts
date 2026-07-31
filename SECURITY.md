@@ -5,21 +5,43 @@
 This document provides a comprehensive security analysis of the PeerX smart contracts, including vulnerability assessments, invariant checks, and audit readiness guidelines.
 
 **Contract Version**: 1  
-**Last Updated**: 2026-02-21  
+**Last Updated**: 2026-07-17  
 **Audit Status**: Pre-audit hardening phase
 
 ---
 
 ## Table of Contents
 
-1. [Security Architecture](#security-architecture)
-2. [Vulnerability Checklist](#vulnerability-checklist)
-3. [Invariant Specifications](#invariant-specifications)
-4. [Authorization Matrix](#authorization-matrix)
-5. [Arithmetic Safety](#arithmetic-safety)
-6. [Fuzz Testing](#fuzz-testing)
-7. [Audit Checklist](#audit-checklist)
-8. [Trust Assumptions](#trust-assumptions)
+1. [Security Response SLA](#security-response-sla)
+2. [Security Architecture](#security-architecture)
+3. [Vulnerability Checklist](#vulnerability-checklist)
+4. [Invariant Specifications](#invariant-specifications)
+5. [Authorization Matrix](#authorization-matrix)
+6. [Arithmetic Safety](#arithmetic-safety)
+7. [Fuzz Testing](#fuzz-testing)
+8. [Audit Checklist](#audit-checklist)
+9. [Trust Assumptions](#trust-assumptions)
+
+---
+
+## Security Response SLA
+
+Security disclosures filed against this repository are handled under a
+documented response SLA, defined in full at [`docs/SLA.md`](docs/SLA.md).
+
+**Summary of commitments:**
+
+| Stage | SLA |
+|-------|-----|
+| **Triage** | Acknowledged **< 24 hours** after the report is received |
+| **Patch (High severity)** | Fix shipped **< 14 days** from confirmation |
+| **Patch (Medium severity)** | Fix shipped **< 30 days** from confirmation |
+| **Disclosure** | **Coordinated** with the reporter, only **after the patch** is available |
+
+These commitments apply to all security disclosures, whether filed through
+GitHub (using the security vulnerability issue template) or reported privately
+to the security contact below. See [`docs/SLA.md`](docs/SLA.md) for severity
+definitions, scope, exception handling, and the full disclosure process.
 
 ---
 
@@ -377,8 +399,13 @@ proptest! {
 ## Security Contacts
 
 For security issues, please contact:
-- GitHub Issues: [Project Issues](https://github.com/your-org/peerx-contracts/issues)
+- GitHub Issues: [Project Issues](https://github.com/your-org/peerx-contracts/issues) (use the **Security Vulnerability** issue template)
 - Security Email: security@peerx.example
+
+**Response expectations**: all reports are handled under our documented
+[Security Response SLA](docs/SLA.md) — acknowledgment **< 24 hours**, patches
+**< 14 days (High)** / **< 30 days (Medium)**, and coordinated disclosure
+**after the patch** ships.
 
 ---
 
@@ -396,3 +423,4 @@ For security issues, please contact:
 | Date | Version | Changes |
 |------|---------|---------|
 | 2026-02-21 | 1.0 | Initial security documentation |
+| 2026-07-17 | 1.1 | Added documented Security Response SLA ([`docs/SLA.md`](docs/SLA.md)): `< 24 h` triage ack, `< 14 days` High / `< 30 days` Medium patch windows, coordinated post-patch disclosure |

@@ -36,4 +36,6 @@ pub enum ZKPError {
     ComplianceCheckFailed = 513,
     /// Cryptographic operation failed
     CryptoOperationFailed = 514,
+    /// No receipt found for the given (or empty) transaction hash
+    ProofNotFound = 515,
 }

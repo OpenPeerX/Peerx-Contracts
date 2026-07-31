@@ -1,0 +1,44 @@
+{
+  "balances": [
+    {
+      "address": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+      "asset": "XLM",
+      "amount": "10000000000"
+    },
+    {
+      "address": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBEIAM",
+      "asset": "USDCSIM",
+      "amount": "-2500000"
+    }
+  ],
+  "pool_xlm": "500000000000",
+  "pool_usdc": "250000000000",
+  "total_fees": "1250000",
+  "badges": [
+    {
+      "address": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+      "badge": "EARLY_LP",
+      "earned": true
+    }
+  ],
+  "tiers": [
+    {
+      "address": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+      "tier": "GOLD"
+    }
+  ],
+  "paused": false,
+  "frozen_users": [
+    "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC4TWM"
+  ],
+  "block_volume": [
+    {
+      "block": "1000042",
+      "volume": "300000000"
+    },
+    {
+      "block": "1000043",
+      "volume": "125000000"
+    }
+  ]
+}

@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 autotests = false
+license = "MIT"
 
 [lib]
 crate-type = ["lib", "cdylib"]
@@ -25,3 +26,15 @@ proptest = "1.4"
 # Off by default to avoid overhead in production.
 logging = []
 experimental = []
+
+# Deterministic test harness: pins ledger timestamps and publishes
+# Jest-style timing artifacts to CARGO_TARGET_TMPDIR/timing/.
+# Enable with --features test-determinism (implied when running tests
+# through the test-harness CI job).
+test-determinism = []
+
+# Selects the compiled default for observability::LogLevel (overridable at
+# runtime by the admin via set_log_level). Mutually exclusive; omitting both
+# yields the dev default (Debug). See src/observability.rs.
+mainnet = []
+testnet = []

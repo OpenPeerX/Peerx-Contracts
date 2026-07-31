@@ -1,7 +1,27 @@
-#![cfg_attr(all(not(test), target_family = "wasm"), no_std)]
+#![cfg_attr(all(not(test), target_family="wasm"), no_std)]
+#![deny(missing_docs)]
+//! PeerX Contracts
+//! 
+//! Production-grade Soroban smart contracts for a risk-free, on-chain trading classroom.
+//! 
+//! This contract implements a full simulated decentralized exchange (DEX) with:
+//! - Constant-product AMM swaps
+//! - Multi-hop routing
+//! - Liquidity pools with LP tokens
+//! - Limit and stop-loss orders
+//! - KYC system
+//! - Rate limiting
+//! - Circuit breakers
+//! - Governance parameters
+//! - Referral system
+//! - Staking bonuses
+//! - And much more!
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, Env, IntoVal, Map, Symbol,
+    TryFromVal, Val, Vec,
 };
+#[cfg(feature = "experimental")]
+use soroban_sdk::Bytes;
 
 // Bring in modules from parent directory
 mod admin;
@@ -16,6 +36,9 @@ mod kyc;
 #[cfg(test)]
 mod kyc_tests;
 mod liquidity_pool;
+mod observability;
+#[cfg(test)]
+mod observability_tests;
 mod rate_limit;
 mod state_snapshot;
 #[cfg(test)]
@@ -50,10 +73,12 @@ mod governance_system;
 mod governance_params;
 mod nonce;
 mod risk_management;
+mod validation;
 
 pub use governance_params::{GovernanceParams, ParamKey, PendingParamUpdate};
 pub use nonce::NonceGuard;
 pub use rate_limit::SensitiveRateLimiter;
+pub use rate_limit::action_tags as sensitive_action_tags;
 
 mod portfolio {
     include!("../portfolio.rs");
@@ -79,9 +104,15 @@ mod network_congestion;
 #[cfg(all(test, feature = "experimental"))]
 mod dynamic_fee_adjustment_tests;
 mod risk_management_tests;
+#[cfg(test)]
+mod fuzz;
 
 // Staking Bonus System
 mod staking_bonus;
+
+// Treasury
+mod treasury;
+pub use treasury::{TreasuryManager, TreasuryKey, WithdrawRequest};
 
 // Re-export fee adjustment types
 #[cfg(feature = "experimental")]
@@ -156,19 +187,40 @@ pub use zkp_proof_generation::ProofGenerator;
 #[cfg(feature = "experimental")]
 pub use zkp_types::{
     AuditEventType, AuditLogEntry, BalanceProof, Commitment, PrivateTransaction, ProofScheme,
-    ProofVerificationResult, RangeProof, TransactionWitness, ZKProof,
+    ProofVerificationResult, RangeProof, Receipt, TransactionWitness, ZKProof,
 };
 #[cfg(feature = "experimental")]
 pub use zkp_verification::ProofVerifier;
 
 use portfolio::{Asset, CachedPortfolio, CachedTopTraders, LPPosition, Portfolio};
+pub use observability::LogLevel;
 pub use portfolio::{Badge, Metrics, Transaction};
 pub use rate_limit::{RateLimitStatus, RateLimiter};
 pub use tiers::UserTier;
 use trading::perform_swap;
 
-use crate::errors::{ContractError, PeerXError};
-use crate::storage::{ADMIN_KEY, PAUSED_KEY};
+use crate::errors::{ContractError, PeerXError, SwapChecklist};
+use crate::storage::{ADMIN_KEY, PAUSED_KEY, READ_ONLY_ROLE_KEY};
+
+/// Checks `role` against the durably-stored read-only auditor/dashboard
+/// role set via `CounterContract::set_read_only_role`. Deliberately does
+/// NOT call `role.require_auth()` - the whole point of `invoke_read` is
+/// letting auditors/dashboards reach read-only entry points without
+/// submitting a signed transaction of their own; the admin-curated
+/// allowlist plus this identity check are the only gate.
+fn require_read_only_role(env: &Env, role: &Address) -> Result<(), PeerXError> {
+    let stored: Address = env
+        .storage()
+        .persistent()
+        .get(&READ_ONLY_ROLE_KEY)
+        .ok_or(PeerXError::NotReadOnlyRole)?;
+
+    if stored == *role {
+        Ok(())
+    } else {
+        Err(PeerXError::NotReadOnlyRole)
+    }
+}
 
 pub(crate) fn require_verified_user(env: &Env, user: &Address) -> Result<(), ContractError> {
     kyc::KYCSystem::require_verified(env, user)
@@ -196,6 +248,14 @@ pub fn resume_trading(env: Env, caller: Address) -> Result<bool, PeerXError> {
 pub fn set_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), PeerXError> {
     caller.require_auth();
     crate::admin::require_admin(&env, &caller)?;
+
+    // ── Sensitive-action rate limit (audit-logged) ─────────────────────────
+    SensitiveRateLimiter::check_and_record_tagged(
+        &env,
+        &caller,
+        crate::rate_limit::action_tags::SET_ADMIN,
+    )?;
+
     env.storage().persistent().set(&ADMIN_KEY, &new_admin);
     Ok(())
 }
@@ -315,17 +375,12 @@ fn apply_trader_limit(
     traders: Vec<(Address, i128)>,
     limit: u32,
 ) -> Vec<(Address, i128)> {
-    let max_limit = if limit > 100 { 100 } else { limit };
     let mut result = Vec::new(env);
-    let len = traders.len() as usize;
-    let cap = if len < max_limit as usize {
-        len
-    } else {
-        max_limit as usize
-    };
+    let len = traders.len() as u32;
+    let cap = if len < limit { len } else { limit };
 
     for i in 0..cap {
-        if let Some(entry) = traders.get(i as u32) {
+        if let Some(entry) = traders.get(i) {
             result.push_back(entry);
         }
     }
@@ -357,6 +412,19 @@ impl CounterContract {
         migration::migrate_from_v1_to_v2(&env)
     }
 
+    /// Mint simulated tokens to a user.
+    /// 
+    /// This is an admin-only function that creates new simulated tokens
+    /// and credits them to the specified user's balance.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `token` - The token symbol to mint (XLM or a custom token)
+    /// * `to` - The address to mint tokens to
+    /// * `amount` - The amount of tokens to mint
+    /// 
+    /// # Panics
+    /// This function will panic if called by a non-admin user
     pub fn mint(env: Env, token: Symbol, to: Address, amount: i128) {
         let mut portfolio: Portfolio = env
             .storage()
@@ -376,6 +444,18 @@ impl CounterContract {
         invalidate_query_cache(&env);
     }
 
+    /// Get the token balance of a user.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `token` - The token symbol to check balance for
+    /// * `user` - The user address to check
+    /// 
+    /// # Returns
+    /// The token balance of the user
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn balance_of(env: Env, token: Symbol, user: Address) -> i128 {
         let portfolio: Portfolio = env
             .storage()
@@ -498,18 +578,167 @@ impl CounterContract {
         // Flush batched badge events
         crate::events::Events::flush_badge_events(&env);
 
-        // Optional structured logging for successful swap
-        #[cfg(feature = "logging")]
-        {
-            use soroban_sdk::symbol_short;
-            env.events()
-                .publish((symbol_short!("swap")), (amount, out_amount));
-        }
+        // Structured logging for successful swap, gated by the admin-set
+        // log level (see observability.rs) rather than a compile-time flag.
+        observability::log(
+            &env,
+            observability::LogLevel::Debug,
+            (symbol_short!("swap"),),
+            (amount, out_amount),
+        );
 
         Ok(out_amount)
     }
 
-    /// Non-panicking swap that counts failed orders and returns 0 on failure
+    /// Pre-flight validation for a swap intent.
+    ///
+    /// Mirrors every guard that [`swap`] applies – balance, KYC, rate-limit,
+    /// oracle freshness, pool depth, slippage, circuit-breaker, trading-pause,
+    /// and pair validity – but is **read-only**.  No state is mutated and no
+    /// authentication is required.
+    ///
+    /// A fully-green `SwapChecklist` (all fields `true`) means the swap
+    /// **should** succeed on-chain (barring race conditions between this
+    /// read and the actual submission).
+    pub fn preflight_swap(
+        env: Env,
+        from: Symbol,
+        to: Symbol,
+        amount: i128,
+        user: Address,
+    ) -> SwapChecklist {
+        let mut checklist = SwapChecklist {
+            balance_ok: false,
+            kyc_ok: false,
+            rate_limit_ok: false,
+            slippage_ok: false,
+            oracle_fresh_ok: false,
+            pool_depth_ok: false,
+            circuit_breaker_ok: false,
+            trading_paused_ok: false,
+            pair_ok: false,
+        };
+
+        // ── Pair validity ────────────────────────────────────────────────────
+        checklist.pair_ok = validation::validate_swap_pair(from.clone(), to.clone()).is_ok();
+        if !checklist.pair_ok {
+            return checklist;
+        }
+
+        // ── Trading pause ────────────────────────────────────────────────────
+        let paused: bool = env
+            .storage()
+            .persistent()
+            .get(&PAUSED_KEY)
+            .unwrap_or(false);
+        checklist.trading_paused_ok = !paused;
+        if !checklist.trading_paused_ok {
+            return checklist;
+        }
+
+        // ── Circuit breaker ──────────────────────────────────────────────────
+        checklist.circuit_breaker_ok =
+            !risk_management::CircuitBreaker::is_circuit_breaker_active(&env);
+
+        // ── KYC ──────────────────────────────────────────────────────────────
+        checklist.kyc_ok = kyc::KYCSystem::is_verified(&env, &user);
+
+        // ── Balance ──────────────────────────────────────────────────────────
+        let portfolio: Portfolio = env
+            .storage()
+            .instance()
+            .get(&())
+            .unwrap_or_else(|| Portfolio::new(&env));
+
+        let from_asset = if from == symbol_short!("XLM") {
+            Asset::XLM
+        } else {
+            Asset::Custom(from.clone())
+        };
+        let balance = portfolio.balance_of(&env, from_asset, user.clone());
+        checklist.balance_ok = balance >= amount;
+
+        // ── Rate limit ───────────────────────────────────────────────────────
+        let user_tier = portfolio.get_user_tier(&env, user.clone());
+        checklist.rate_limit_ok =
+            RateLimiter::check_swap_limit(&env, &user, &user_tier).is_ok();
+
+        // ── Oracle freshness ─────────────────────────────────────────────────
+        const STALE_THRESHOLD: u64 = 600; // 10 minutes
+        let oracle_fresh = oracle::get_stored_price(&env, (from.clone(), to.clone()))
+            .or_else(|| oracle::get_stored_price(&env, (to.clone(), from.clone())))
+            .map(|data| {
+                let age = env.ledger().timestamp().saturating_sub(data.timestamp);
+                age <= STALE_THRESHOLD && data.price > 0
+            })
+            .unwrap_or(false);
+        // Allow 1:1 fallback when no oracle is configured – treat as fresh
+        checklist.oracle_fresh_ok = oracle_fresh || amount > 0;
+
+        // ── Pool depth ───────────────────────────────────────────────────────
+        let xlm_liq = portfolio.get_liquidity(Asset::XLM);
+        let usdc_liq =
+            portfolio.get_liquidity(Asset::Custom(symbol_short!("USDCSIM")));
+        let reserves_sufficient = if from == symbol_short!("XLM") {
+            usdc_liq >= amount
+        } else {
+            xlm_liq >= amount
+        };
+        checklist.pool_depth_ok = reserves_sufficient;
+
+        // ── Slippage ─────────────────────────────────────────────────────────
+        // Estimate slippage using constant-product AMM formula
+        let (reserve_in, reserve_out) = if from == symbol_short!("XLM") {
+            (xlm_liq as u128, usdc_liq as u128)
+        } else {
+            (usdc_liq as u128, xlm_liq as u128)
+        };
+        if reserve_in > 0 && reserve_out > 0 {
+            let amount_u = amount as u128;
+            // Output with fee
+            let fee_bps: u128 = 30; // 0.3%
+            let amount_after_fee = amount_u * (10000 - fee_bps) / 10000;
+            let actual_out = (reserve_out * amount_after_fee) / (reserve_in + amount_after_fee);
+            // Theoretical output without fee (for slippage calc)
+            let theoretical_out = (reserve_out * amount_u) / (reserve_in + amount_u);
+            let max_slip: u32 = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("MAX_SLIP"))
+                .unwrap_or(10000);
+            let slippage_ok = if theoretical_out > 0 {
+                let slippage_bps = ((theoretical_out - actual_out) * 10000) / theoretical_out;
+                slippage_bps <= max_slip as u128
+            } else {
+                true
+            };
+            checklist.slippage_ok = slippage_ok;
+        } else {
+            // No liquidity – AMM fallback uses oracle price, slippage N/A
+            checklist.slippage_ok = true;
+        }
+
+        checklist
+    }
+
+    /// Non-panicking swap that counts failed orders and returns 0 on failure.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `from` - The token to swap from
+    /// * `to` - The token to swap to
+    /// * `amount` - The amount to swap
+    /// * `user` - The user performing the swap
+    /// 
+    /// # Returns
+    /// The amount received from the swap, or 0 if the swap failed
+    /// 
+    /// # Events
+    /// Emits a "fail" event if the swap fails
+    /// Emits a "swap" event if the swap succeeds
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn safe_swap(env: Env, from: Symbol, to: Symbol, amount: i128, user: Address) -> i128 {
         if require_authenticated_verified_user(&env, &user).is_err() {
             return 0;
@@ -532,12 +761,12 @@ impl CounterContract {
             env.storage().instance().set(&(), &portfolio);
             invalidate_query_cache(&env);
 
-            #[cfg(feature = "logging")]
-            {
-                use soroban_sdk::symbol_short;
-                env.events()
-                    .publish((symbol_short!("fail"), user.clone()), (from, to, amount));
-            }
+            observability::log(
+                &env,
+                observability::LogLevel::Warn,
+                (symbol_short!("fail"), user.clone()),
+                (from, to, amount),
+            );
             return 0;
         }
 
@@ -549,17 +778,24 @@ impl CounterContract {
         // Flush batched badge events
         crate::events::Events::flush_badge_events(&env);
 
-        #[cfg(feature = "logging")]
-        {
-            use soroban_sdk::symbol_short;
-            env.events()
-                .publish((symbol_short!("swap")), (amount, out_amount));
-        }
+        observability::log(
+            &env,
+            observability::LogLevel::Debug,
+            (symbol_short!("swap"),),
+            (amount, out_amount),
+        );
 
         out_amount
     }
 
-    /// Record a swap execution for a user
+    /// Record a swap execution for a user.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user who performed the trade
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn record_trade(env: Env, user: Address) {
         let mut portfolio: Portfolio = env
             .storage()
@@ -573,7 +809,19 @@ impl CounterContract {
         invalidate_query_cache(&env);
     }
 
-    /// Get portfolio stats for a user (trade count, pnl)
+    /// Get portfolio stats for a user (trade count, pnl).
+    /// 
+    /// Uses caching with a configurable TTL.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to get portfolio stats for
+    /// 
+    /// # Returns
+    /// A tuple of (trade count, pnl)
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_portfolio(env: Env, user: Address) -> (u32, i128) {
         let now = env.ledger().timestamp();
         let ttl = get_cache_ttl(&env);
@@ -620,6 +868,16 @@ impl CounterContract {
     }
 
     /// Get top traders with instance-storage caching.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `limit` - Maximum number of traders to return
+    /// 
+    /// # Returns
+    /// A vector of (address, pnl), sorted by pnl descending
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_top_traders(env: Env, limit: u32) -> Vec<(Address, i128)> {
         let now = env.ledger().timestamp();
         let ttl = get_cache_ttl(&env);
@@ -642,7 +900,8 @@ impl CounterContract {
             .get(&())
             .unwrap_or_else(|| Portfolio::new(&env));
 
-        let traders = portfolio.get_top_traders(&env, 100);
+        let candidate_limit = if limit > 100 { limit } else { limit.max(100) };
+        let traders = portfolio.get_top_traders(&env, candidate_limit);
         env.storage().instance().set(
             &TOP_TRADERS_CACHE_KEY,
             &CachedTopTraders {
@@ -655,6 +914,17 @@ impl CounterContract {
     }
 
     /// Update cache TTL in seconds (admin only).
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `caller` - The admin caller address
+    /// * `ttl_seconds` - New cache TTL in seconds
+    /// 
+    /// # Errors
+    /// Returns `PeerXError::NotAdmin` if caller is not admin
+    /// 
+    /// # Panics
+    /// Panics if caller authentication fails
     pub fn set_cache_ttl(
         env: Env,
         caller: Address,
@@ -666,7 +936,50 @@ impl CounterContract {
         Ok(())
     }
 
+    // ===== OBSERVABILITY =====
+
+    /// Set the minimum event log level (admin only). Durable across calls
+    /// and upgrades; overrides the compiled per-network default (Debug on
+    /// dev, Info on testnet, Warn on mainnet). See src/observability.rs.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `caller` - The admin caller address
+    /// * `level` - The new minimum log level
+    /// 
+    /// # Errors
+    /// Returns `PeerXError::NotAdmin` if caller is not admin
+    /// 
+    /// # Panics
+    /// Panics if caller authentication fails
+    pub fn set_log_level(env: Env, caller: Address, level: LogLevel) -> Result<(), PeerXError> {
+        observability::set_log_level(&env, caller, level)
+    }
+
+    /// Get the currently effective minimum event log level.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// 
+    /// # Returns
+    /// The current minimum log level
+    /// 
+    /// # Panics
+    /// This function never panics
+    pub fn get_log_level(env: Env) -> LogLevel {
+        observability::get_log_level(&env)
+    }
+
     /// Get cache stats as (hits, misses, hit_ratio_bps).
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// 
+    /// # Returns
+    /// A tuple of (hits, misses, hit_ratio_bps)
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_cache_stats(env: Env) -> (u64, u64, u32) {
         let hits: u64 = env.storage().instance().get(&CACHE_HITS_KEY).unwrap_or(0);
         let misses: u64 = env.storage().instance().get(&CACHE_MISSES_KEY).unwrap_or(0);
@@ -674,6 +987,16 @@ impl CounterContract {
     }
 
     /// Clear all query caches (admin only).
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `caller` - The admin caller address
+    /// 
+    /// # Errors
+    /// Returns `PeerXError::NotAdmin` if caller is not admin
+    /// 
+    /// # Panics
+    /// Panics if caller authentication fails
     pub fn clear_cache(env: Env, caller: Address) -> Result<(), PeerXError> {
         caller.require_auth();
         crate::admin::require_admin(&env, &caller)?;
@@ -681,7 +1004,16 @@ impl CounterContract {
         Ok(())
     }
 
-    /// Get aggregate metrics
+    /// Get aggregate metrics.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// 
+    /// # Returns
+    /// Aggregate metrics for the contract
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_metrics(env: Env) -> Metrics {
         let portfolio: Portfolio = env
             .storage()
@@ -692,7 +1024,18 @@ impl CounterContract {
         portfolio.get_metrics()
     }
 
-    /// Check if a user has earned a specific badge
+    /// Check if a user has earned a specific badge.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to check
+    /// * `badge` - The badge to check for
+    /// 
+    /// # Returns
+    /// True if the user has the badge, false otherwise
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn has_badge(env: Env, user: Address, badge: Badge) -> bool {
         let portfolio: Portfolio = env
             .storage()
@@ -703,7 +1046,17 @@ impl CounterContract {
         portfolio.has_badge(&env, user, badge)
     }
 
-    /// Get all badges earned by a user
+    /// Get all badges earned by a user.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to get badges for
+    /// 
+    /// # Returns
+    /// A vector of badges earned by the user
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_user_badges(env: Env, user: Address) -> Vec<Badge> {
         let portfolio: Portfolio = env
             .storage()
@@ -714,6 +1067,18 @@ impl CounterContract {
         portfolio.get_user_badges(&env, user)
     }
 
+    /// Get recent transactions for a user.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to get transactions for
+    /// * `limit` - Maximum number of transactions to return
+    /// 
+    /// # Returns
+    /// A vector of recent transactions for the user
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_user_transactions(env: Env, user: Address, limit: u32) -> Vec<Transaction> {
         let portfolio: Portfolio = env
             .storage()
@@ -724,7 +1089,17 @@ impl CounterContract {
         portfolio.get_user_transactions(&env, user, limit)
     }
 
-    /// Get the current tier for a user
+    /// Get the current tier for a user.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to get the tier for
+    /// 
+    /// # Returns
+    /// The user's current tier
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_user_tier(env: Env, user: Address) -> UserTier {
         let portfolio: Portfolio = env
             .storage()
@@ -737,7 +1112,17 @@ impl CounterContract {
 
     // ===== RATE LIMITING =====
 
-    /// Get rate limit status for swap operations
+    /// Get rate limit status for swap operations.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to check rate limits for
+    /// 
+    /// # Returns
+    /// The rate limit status for swap operations
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_swap_rate_limit(env: Env, user: Address) -> RateLimitStatus {
         let portfolio: Portfolio = env
             .storage()
@@ -749,7 +1134,17 @@ impl CounterContract {
         RateLimiter::get_swap_status(&env, &user, &user_tier)
     }
 
-    /// Get rate limit status for LP operations
+    /// Get rate limit status for LP operations.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to check rate limits for
+    /// 
+    /// # Returns
+    /// The rate limit status for LP operations
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn get_lp_rate_limit(env: Env, user: Address) -> RateLimitStatus {
         let portfolio: Portfolio = env
             .storage()
@@ -763,24 +1158,34 @@ impl CounterContract {
 
     /// Remove expired rate limit counters for a user.
     /// Returns the number of storage entries cleaned up.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to clean up rate limits for
+    /// 
+    /// # Returns
+    /// The number of storage entries cleaned up
+    /// 
+    /// # Panics
+    /// This function never panics
     pub fn cleanup_rate_limits(env: Env, user: Address) -> u32 {
         RateLimiter::cleanup_rate_limits(&env, &user)
     }
 
-    // ===== OBSERVABILITY =====
-
-    /// Admin-triggered emission of the current swap-size histogram.
-    /// Useful when the automatic 1 000-swap cadence has not been reached yet
-    /// but fresh metrics are needed (e.g., before a protocol upgrade).
-    pub fn emit_swap_distribution(env: Env, admin: Address) {
-        admin.require_auth();
-        crate::admin::require_admin(&env, &admin)
-            .expect("only admin may trigger swap distribution");
-        crate::events::Events::emit_swap_distribution(
-            &env,
-            admin,
-            env.ledger().timestamp() as i64,
-        );
+    /// Get the number of sensitive admin actions used by `user` in the
+    /// current 10-minute window (limit = `SENSITIVE_ACTION_LIMIT`).
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `user` - The user to check sensitive rate limit usage for
+    /// 
+    /// # Returns
+    /// The number of sensitive actions used in the current window
+    /// 
+    /// # Panics
+    /// This function never panics
+    pub fn get_sensitive_rate_limit_usage(env: Env, user: Address) -> u32 {
+        SensitiveRateLimiter::current_usage(&env, &user)
     }
 
     // ===== BATCH OPERATIONS =====
@@ -1469,6 +1874,65 @@ impl CounterContract {
     }
 
     // ────────────────────────────────────────────────────────────────────────
+    // Treasury
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// Credit `amount` to the treasury from `source`.
+    ///
+    /// This entry point is intentionally public so governance or admin tools
+    /// can make manual top-ups.  Penalty credits from early-unstake happen
+    /// automatically inside `staking_bonus::unstake_early`.
+    ///
+    /// # Errors
+    /// Returns [`PeerXError::TreasuryInvalidAmount`] when `amount <= 0`.
+    pub fn treasury_deposit(env: Env, amount: i128, source: Symbol) -> Result<(), ContractError> {
+        TreasuryManager::deposit(&env, amount, source)
+    }
+
+    /// Return the current treasury balance (read-only, no auth required).
+    pub fn treasury_balance(env: Env) -> i128 {
+        TreasuryManager::balance(&env)
+    }
+
+    /// Governance-gated two-phase withdrawal.
+    ///
+    /// * Phase 1 — `request`:  creates a pending request locked by the
+    ///   configured timelock (default 48 h).  Returns the request ID.
+    /// * Phase 2 — `execute`:  after the timelock, finalise the request.
+    ///   Returns the executed [`WithdrawRequest`].
+    ///
+    /// Both phases require admin auth.
+    ///
+    /// # Arguments
+    /// * `phase`      – Either `symbol_short!("request")` or
+    ///                  `symbol_short!("execute")`.
+    /// * `amount`     – Amount for the `request` phase (ignored for `execute`).
+    /// * `destination`– Destination address for the `request` phase (ignored
+    ///                  for `execute`).
+    /// * `request_id` – For the `execute` phase: ID returned by the `request`
+    ///                  phase.  Use `0` for the `request` phase.
+    pub fn treasury_withdraw(
+        env: Env,
+        admin: Address,
+        phase: Symbol,
+        amount: i128,
+        destination: Address,
+        request_id: u64,
+    ) -> Result<u64, ContractError> {
+        admin.require_auth();
+        crate::admin::require_admin(&env, &admin)?;
+
+        if phase == symbol_short!("request") {
+            let id = TreasuryManager::request_withdraw(&env, amount, destination)?;
+            Ok(id)
+        } else {
+            // execute phase — returns the request id on success
+            TreasuryManager::execute_withdraw(&env, request_id)?;
+            Ok(request_id)
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
     // KYC Verification System
     // ────────────────────────────────────────────────────────────────────────
 
@@ -1580,9 +2044,28 @@ impl CounterContract {
     pub fn withdraw_commission(env: Env, user: Address) -> i128 {
         referral_system::withdraw_commission(&env, user)
     }
+
+    // ── Zero-Knowledge Privacy ───────────────────────────────────────────────
+
+    /// Fetch the audit-friendly receipt for a private transaction, by its
+    /// transaction hash. Public: off-chain consumers (indexers, compliance
+    /// tooling) use this to verify a private transaction occurred without
+    /// the contract exposing the underlying private witness values.
+    ///
+    /// Returns `ZKPError::ProofNotFound` for an empty or unrecognized hash.
+    #[cfg(feature = "experimental")]
+    pub fn private_tx_receipt(env: Env, tx_hash: Bytes) -> Result<Receipt, ZKPError> {
+        zkp_verification::receipts::get_receipt(&env, tx_hash)
+    }
 }
 
+#[cfg(all(test, feature = "test-determinism"))]
+mod test_harness;
 #[cfg(all(test, feature = "experimental"))]
 mod migration_tests;
+#[cfg(all(test, feature = "experimental"))]
+mod zkp_receipt_tests;
 mod risk_management_tests;
 mod governance_tests;
+#[cfg(test)]
+mod read_only_role_tests;

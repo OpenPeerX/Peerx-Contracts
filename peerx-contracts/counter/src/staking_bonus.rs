@@ -13,6 +13,7 @@
 /// - 365 days: 50% bonus
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Vec};
 use crate::errors::PeerXError;
+use crate::treasury::TreasuryManager;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -314,6 +315,14 @@ impl StakingBonusManager {
             (symbol_short!("unstk_erl"), user.clone()),
             (stake_id, penalty),
         );
+
+        // Credit the penalty to the treasury (acceptance criterion #85).
+        // A deposit failure must not prevent the user from unstaking; we
+        // silently allow it only when the amount is somehow zero, which
+        // cannot happen here (penalty is always ≥ 1 when amount ≥ 10).
+        if penalty > 0 {
+            let _ = TreasuryManager::deposit(env, penalty, symbol_short!("penalty"));
+        }
 
         Ok((principal_returned, penalty))
     }

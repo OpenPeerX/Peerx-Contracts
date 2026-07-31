@@ -1,0 +1,27 @@
+[package]
+name = "peerx-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["PeerX Contributors"]
+description = "Command-line interface for PeerX Contracts with health checks and operational tools"
+license = "MIT"
+
+[[bin]]
+name = "peerx"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "cargo", "env"] }
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+colored = "2.1"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+dirs = "5.0"
+
+[dev-dependencies]
+mockito = "1.2"
+tokio-test = "0.4"

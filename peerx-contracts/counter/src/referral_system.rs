@@ -227,6 +227,15 @@ fn add_commission_balance(env: &Env, user: Address, amount: i128) {
 pub fn withdraw_commission(env: &Env, user: Address) -> i128 {
     user.require_auth();
 
+    // ── Sensitive-action rate limit (audit-logged) ─────────────────────────
+    if let Err(_) = crate::rate_limit::SensitiveRateLimiter::check_and_record_tagged(
+        env,
+        &user,
+        crate::rate_limit::action_tags::WD_COMM,
+    ) {
+        return 0;
+    }
+
     let balance = env
         .storage()
         .instance()

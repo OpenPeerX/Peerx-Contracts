@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 🔒 Security Policy & Response SLA
+    url: https://github.com/madisonsc52-del/Peerx-Contracts/blob/main/docs/SLA.md
+    about: Security disclosures are acknowledged < 24 h, patched < 14 days (High) / < 30 days (Medium), and disclosed after the patch. Review the SLA before reporting.
+  - name: 📧 Private Security Report
+    url: mailto:security@peerx.example
+    about: Report sensitive vulnerabilities privately instead of filing a public issue.

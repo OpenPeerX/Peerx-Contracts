@@ -1,0 +1,17 @@
+{
+  "network": {
+    "name": "testnet",
+    "rpc_url": "https://soroban-testnet.stellar.org",
+    "horizon_url": "https://horizon-testnet.stellar.org",
+    "passphrase": "Test SDF Network ; September 2015"
+  },
+  "contract": {
+    "contract_id": "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "admin_address": "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+  },
+  "health": {
+    "timeout_seconds": 30,
+    "oracle_freshness_threshold_seconds": 300,
+    "max_retries": 3
+  }
+}
