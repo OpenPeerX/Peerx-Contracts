@@ -17,6 +17,15 @@ use soroban_sdk::contracterror;
 pub enum PeerXError {
     // ── Admin / access control ──────────────────────────────────────────────
     NotAdmin = 1,
+    /// Caller is not the currently configured read-only role (see
+    /// `set_read_only_role` / `invoke_read`).
+    NotReadOnlyRole = 2,
+    /// Arguments passed to `invoke_read` didn't decode into the shape the
+    /// target read-only function expects.
+    InvalidReadArgs = 3,
+    /// `invoke_read`'s `fn_name` isn't on the read-only allowlist - this
+    /// includes every mutating entry point, by construction.
+    UnsupportedReadOnlyFunction = 4,
 
     // ── Trading / contract state ────────────────────────────────────────────
     TradingPaused = 10,
@@ -75,6 +84,18 @@ pub enum PeerXError {
     NoClaimableBonuses = 604,
     DistributionTooEarly = 605,
 
+    // ── Treasury ─────────────────────────────────────────────────────────────
+    /// Deposit amount must be positive.
+    TreasuryInvalidAmount = 610,
+    /// Withdraw amount exceeds current treasury balance.
+    TreasuryInsufficientFunds = 611,
+    /// The governance timelock for this withdrawal has not elapsed yet.
+    TreasuryTimelockNotElapsed = 612,
+    /// A withdrawal request for this ID was not found.
+    TreasuryWithdrawNotFound = 613,
+    /// The withdrawal request has already been executed.
+    TreasuryWithdrawAlreadyExecuted = 614,
+
     // ── Emergency / circuit-breaker ─────────────────────────────────────────
     NotEmergencyAdmin = 700,
 
@@ -86,3 +107,37 @@ pub enum PeerXError {
 
 /// Alias kept for modules that still import `ContractError` by name.
 pub type ContractError = PeerXError;
+
+/// Pre-flight checklist result returned by `preflight_swap`.
+///
+/// Every field is `true` when the corresponding on-chain guard passes.
+/// A fully-green checklist means the swap **should** succeed (barring
+/// race conditions between the pre-flight read and the actual tx).
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SwapChecklistError {
+    BalanceCheckFailed = 900,
+    KYCNotVerified = 901,
+    RateLimitExceeded = 902,
+    SlippageCheckFailed = 903,
+    OracleStale = 904,
+    PoolDepthInsufficient = 905,
+    CircuitBreakerActive = 906,
+    TradingPaused = 907,
+    InvalidSwapPair = 908,
+}
+
+/// Aggregate result of a pre-flight swap validation.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SwapChecklist {
+    pub balance_ok: bool,
+    pub kyc_ok: bool,
+    pub rate_limit_ok: bool,
+    pub slippage_ok: bool,
+    pub oracle_fresh_ok: bool,
+    pub pool_depth_ok: bool,
+    pub circuit_breaker_ok: bool,
+    pub trading_paused_ok: bool,
+    pub pair_ok: bool,
+}

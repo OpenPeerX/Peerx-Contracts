@@ -505,3 +505,108 @@ fn test_sensitive_contract_entry_points_require_verified_kyc() {
     });
     assert_eq!(stake_id, 0);
 }
+
+// ===== Batch `MintToken` admin-gate regression tests (issue #39) =====
+//
+// Before the fix, `authorize_batch_access` did nothing for `MintToken` and the
+// `lib.rs` batch entry points set `caller = None` for a mint-first batch, so a
+// batch whose (first) operation was a `MintToken` skipped every KYC and admin
+// guard. Anyone could mint tokens by submitting such a batch. These tests pin
+// down that a batch containing a `MintToken` is now admin-only.
+//
+// NB: these tests intentionally do NOT mock auths, so that `admin.require_auth()`
+// is actually enforced and an unauthorized (non-admin) batch reverts.
+
+/// Sets the contract admin directly in persistent storage, matching how the
+/// production `set_admin` entry point persists it (`ADMIN_KEY`).
+fn set_stored_admin(env: &Env, contract_id: &Address, admin: &Address) {
+    with_contract(env, contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&crate::storage::ADMIN_KEY, admin);
+    });
+}
+
+/// Builds a batch whose only operation mints `amount` of XLM to `to`.
+fn mint_only_batch(env: &Env, to: &Address, amount: i128) -> Vec<BatchOperation> {
+    let mut operations = Vec::new(env);
+    operations.push_back(BatchOperation::MintToken(
+        symbol_short!("XLM"),
+        to.clone(),
+        amount,
+    ));
+    operations
+}
+
+#[test]
+fn test_batch_mint_by_non_admin_reverts_atomic() {
+    let env = Env::default();
+    let contract_id = env.register(CounterContract, ());
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    set_stored_admin(&env, &contract_id, &admin);
+
+    // A mint-only atomic batch submitted without the admin's authorization must
+    // revert (panic on the unmet `admin.require_auth()`), so `attacker` cannot
+    // mint tokens to itself.
+    let unauthorized_mint = panic::catch_unwind(AssertUnwindSafe(|| {
+        with_contract(&env, &contract_id, || {
+            let operations = mint_only_batch(&env, &attacker, 1_000_000);
+            CounterContract::execute_batch_atomic(env.clone(), operations)
+        })
+    }));
+
+    assert!(
+        unauthorized_mint.is_err(),
+        "non-admin atomic batch containing MintToken must revert"
+    );
+}
+
+#[test]
+fn test_batch_mint_by_non_admin_reverts_best_effort() {
+    let env = Env::default();
+    let contract_id = env.register(CounterContract, ());
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    set_stored_admin(&env, &contract_id, &admin);
+
+    // The best-effort path shares `authorize_batch_access`, so it must also
+    // reject an unauthorized mint batch before any operation executes.
+    let unauthorized_mint = panic::catch_unwind(AssertUnwindSafe(|| {
+        with_contract(&env, &contract_id, || {
+            let operations = mint_only_batch(&env, &attacker, 1_000_000);
+            CounterContract::execute_batch_best_effort(env.clone(), operations)
+        })
+    }));
+
+    assert!(
+        unauthorized_mint.is_err(),
+        "non-admin best-effort batch containing MintToken must revert"
+    );
+}
+
+#[test]
+fn test_batch_mint_fails_closed_when_no_admin_configured() {
+    let env = Env::default();
+    let contract_id = env.register(CounterContract, ());
+    let attacker = Address::generate(&env);
+
+    // No admin is configured. The mint guard must fail closed: the batch is
+    // rejected rather than allowed to mint. The atomic entry point converts the
+    // authorization error into a failed (non-executed) result.
+    let result: BatchResult = with_contract(&env, &contract_id, || {
+        let operations = mint_only_batch(&env, &attacker, 1_000_000);
+        CounterContract::execute_batch_atomic(env.clone(), operations)
+    });
+
+    assert_eq!(
+        result.operations_executed, 0,
+        "no operation may execute when the mint guard cannot resolve an admin"
+    );
+    assert!(
+        result.operations_failed >= 1,
+        "mint batch must be reported as failed when no admin is configured"
+    );
+}

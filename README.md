@@ -4,7 +4,7 @@
 > PeerX gives users a fully simulated environment to learn market mechanics — AMM swaps, liquidity provision, limit & stop-loss orders, staking, referrals, and portfolio analytics — without exposing real capital.
 
 [![Soroban](https://img.shields.io/badge/Soroban-21.7.1-7C39C9?logo=stellar&logoColor=white)](https://soroban.stellar.org)
-[![Rust](https://img.shields.io/badge/Rust-1.74%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-1.79.0-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
 [![Audit](https://img.shields.io/badge/audit-pre--audit--hardening-yellow)](#security-posture)
@@ -23,6 +23,7 @@
 - [Getting Started](#getting-started)
 - [Usage Examples](#usage-examples)
 - [Security Posture](#security-posture)
+- [Observability](#observability)
 - [Testing &amp; Verification](#testing-and-verification)
 - [Migrations &amp; Versioning](#migrations-and-versioning)
 - [Operational Runbook](#operational-runbook)
@@ -143,8 +144,12 @@ PeerX-Contracts/
 ├── Cargo.toml                 # Workspace root (counter, soroban-ping)
 ├── soroban.toml               # Soroban network profiles (testnet/mainnet/local)
 ├── README.md                  # ← you are here
-├── SECURITY.md                # Auditing, invariants, trust model
+├── SECURITY.md                # Auditing, invariants, trust model, SLA summary
+├── CONTRIBUTING.md            # Contribution rules + security disclosure SLA acknowledgment
+├── docs/
+│   └── SLA.md                 # Security response SLA: <24h ack, <14d/<30d patches, coordinated disclosure
 ├── .github/
+│   ├── ISSUE_TEMPLATE/       # Issue templates (security reports acknowledge the SLA)
 │   ├── workflows/
 │   │   ├── ci.yml             # Single canonical CI (quality + build + test)
 │   │   └── README.md          # Workflow rationale
@@ -170,7 +175,8 @@ PeerX-Contracts/
     │       ├── staking_bonus.rs      # Locked staking & distributions
     │       ├── emergency.rs          # Pause / freeze / snapshot
     │       ├── migration.rs          # Versioned upgrades
-    │       ├── events.rs             # Batched on-chain events
+    │       ├── events.rs             # Structured events, routed through observability::log
+    │       ├── observability.rs      # LogLevel enum, admin-settable log threshold
     │       └── risk_management/      # Circuit breaker, concentration, limits
     ├── soroban-ping/                  # Hello-world contract, smoke test
     ├── trading_test_runner/           # Off-chain trading test driver
@@ -303,7 +309,81 @@ We treat the contract suite as **auditable production code** even though assets 
 - **Emergency** — admin pause, per-account freeze, on-chain state snapshots for forensic recovery.
 - **Fuzzing** — `cargo test fuzz_ -- --nocapture` exercises edge cases on every entry point.
 
-See [`SECURITY.md`](SECURITY.md) for the full vulnerability checklist, invariant specifications, and authorization matrix.
+See [`SECURITY.md`](SECURITY.md) for the full vulnerability checklist, invariant specifications, and authorization matrix. Security disclosures are handled under a documented [Security Response SLA](docs/SLA.md): acknowledgment **< 24 h**, patches **< 14 days (High)** / **< 30 days (Medium)**, and coordinated disclosure after the patch ships.
+
+---
+
+## Observability {#observability}
+
+Every structured event the contract emits (`src/events.rs`, plus the ad-hoc
+diagnostics previously gated behind `#[cfg(feature = "logging")]` in
+`lib.rs`) is routed through a single choke point in
+[`src/observability.rs`](peerx-contracts/counter/src/observability.rs):
+`observability::log(env, level, topics, data)`. It publishes exactly what
+`env.events().publish(topics, data)` would have published — same event
+names, same payloads — but only if `level` clears the currently configured
+threshold.
+
+### Log levels
+
+```rust
+pub enum LogLevel { Debug, Info, Warn, Error }
+```
+
+Ordered from most to least verbose. A configured threshold of `Warn` means
+only `Warn` and `Error` events are published; `Debug` and `Info` are
+silently dropped before the event is ever written.
+
+### Per-network defaults
+
+Until an admin overrides it, the threshold falls back to a compiled default
+selected by cargo feature:
+
+| Build | Feature | Default level |
+| --- | --- | --- |
+| Dev | *(none)* | `Debug` |
+| Testnet | `testnet` | `Info` |
+| Mainnet | `mainnet` | `Warn` |
+
+```bash
+# Mainnet build — quiet by default, no Debug/Info noise
+cargo build --release --target wasm32-unknown-unknown \
+  --manifest-path peerx-contracts/counter/Cargo.toml --features mainnet
+```
+
+### Admin override
+
+The effective threshold can be changed at runtime — no redeploy required —
+and is stored in **persistent** storage, so it survives across calls and
+contract upgrades:
+
+```bash
+soroban contract invoke --id <CONTRACT_ID> --network mainnet \
+  --source <ADMIN_SECRET> \
+  -- set_log_level --caller <ADMIN_ADDRESS> --level Error
+
+soroban contract invoke --id <CONTRACT_ID> --network mainnet \
+  -- get_log_level
+```
+
+`set_log_level` requires `caller.require_auth()` plus `require_admin` — the
+same admin gate every other privileged entry point uses. Setting `Error`
+silences every event except `Error`-level ones (see
+`observability_tests.rs::error_level_silences_everything_except_error_events`
+for the event-count assertion this guarantees).
+
+### Adding a new event
+
+New helpers in `events.rs` should call `observability::log` instead of
+`env.events().publish` directly, and pick the lowest level that's still
+useful in production:
+
+- `Debug` — high-frequency, per-operation detail (e.g. raw swap amounts).
+- `Info` — normal business events (swaps, LP changes, tier changes).
+- `Warn` — degraded conditions worth an operator's attention (admin
+  pause/resume, failed orders, congestion changes).
+- `Error` — extreme conditions (emergency overrides) that must never be
+  silenced.
 
 ---
 
@@ -391,7 +471,7 @@ Each experimental module has its own test suite gated by the same feature flag; 
 
 ## Contributing
 
-We welcome pull requests for new educational scenarios, additional test coverage, performance wins, and documentation. Please read `CONTRIBUTING.md` (when present) and:
+We welcome pull requests for new educational scenarios, additional test coverage, performance wins, and documentation. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) — which also acknowledges our [Security Response SLA](docs/SLA.md) for security disclosures — and:
 
 1. Run `cargo fmt --all` before pushing.
 2. Add tests for any new entry point.
@@ -402,7 +482,7 @@ We welcome pull requests for new educational scenarios, additional test coverage
 
 ## License
 
-**MIT.** *(No `LICENSE` file is currently committed — add one before publishing. Until then, all rights reserved by default.)*
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
 ---
 

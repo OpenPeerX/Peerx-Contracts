@@ -327,6 +327,13 @@ impl KYCSystem {
         operator.require_auth();
         Self::require_operator(env, operator)?;
 
+        // ── Sensitive-action rate limit (audit-logged) ─────────────────────
+        crate::rate_limit::SensitiveRateLimiter::check_and_record_tagged(
+            env,
+            operator,
+            crate::rate_limit::action_tags::KYC_UPDATE,
+        )?;
+
         // Prevent self-verification
         if operator == user {
             return Err(KYCError::SelfVerificationNotAllowed);
@@ -526,6 +533,13 @@ impl KYCSystem {
     ) -> Result<u64, KYCError> {
         admin.require_auth();
         crate::admin::require_admin(env, admin).map_err(|_| KYCError::NotKYCOperator)?;
+
+        // ── Sensitive-action rate limit (audit-logged) ─────────────────────
+        crate::rate_limit::SensitiveRateLimiter::check_and_record_tagged(
+            env,
+            admin,
+            crate::rate_limit::action_tags::PROP_OVERRIDE,
+        )?;
 
         // Validate reason input (#159).
         validate_symbol_length(&reason, MAX_REASON_LEN)?;

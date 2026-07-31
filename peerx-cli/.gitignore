@@ -1,0 +1,8 @@
+/target
+Cargo.lock
+peerx-cli.json
+.peerx-cli.json
+*.swp
+*.swo
+*~
+.DS_Store
